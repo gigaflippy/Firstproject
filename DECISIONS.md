@@ -6,7 +6,7 @@ Open questions from nightly runs. Answer under **Georgi's answer** (one line is 
 
 ## D-001 — What should nightly runs work on? (opened 2026-10-19)
 
-**Status:** answered — building Pulsewatch here
+**Status:** resolved — Pulsewatch v0.1 core built on `nightly/2026-10-19-pulsewatch-core`
 
 **Context.** The nightly task is pointed at `gigaflippy/Firstproject`. That repo currently holds only `HELLO.md` (the push test from 2026-10-19). There is no code, no tests, no `main` branch (the default branch is `claude/hello-test`), and no description of what it is for. None of the side projects you've been working on (Pulsewatch, CharmMatch, Хранко, Огледалото, Canary, the drone project) exist as repos under `gigaflippy`. Picking a project and a stack for an empty repo would be guessing, so this run stopped here.
 
