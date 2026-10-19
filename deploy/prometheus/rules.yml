@@ -1,0 +1,26 @@
+groups:
+  - name: pulsewatch.recording
+    rules:
+      - record: pulsewatch:uptime_ratio_1h
+        expr: avg_over_time(pulsewatch_up[1h])
+      - record: pulsewatch:latency_p95_seconds
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, target, region) (rate(pulsewatch_probe_latency_seconds_bucket[5m])))
+
+  - name: pulsewatch.alerts
+    rules:
+      - alert: TargetDown
+        expr: pulsewatch_up == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.target }} is down from {{ $labels.region }}"
+      - alert: TargetSlow
+        expr: pulsewatch:latency_p95_seconds > 2
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.target }} p95 latency above 2s from {{ $labels.region }}"
