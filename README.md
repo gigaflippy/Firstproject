@@ -69,7 +69,15 @@ Runtime settings come from environment variables:
 | `pulsewatch_probe_latency_seconds` | histogram | `target`, `region` |
 | `pulsewatch_probes_total` | counter | `target`, `region`, `result` (`up`/`down`) |
 
-`deploy/prometheus/` includes recording rules for 1h uptime ratio and p95 latency, plus a `TargetDown` alert (down for 2 minutes).
+`deploy/prometheus/rules.yml` holds recording rules for 1h uptime ratio and p95 latency, plus these alerts:
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `TargetDown` | the target is down from **every** region for 2m | page |
+| `TargetDownInSomeRegions` | the target is down from some regions but up from others for 5m (regional or network-path issue) | warn |
+| `TargetSlow` | p95 latency is above 2s for 10m | warn |
+
+Requiring every region to agree is what keeps a single bad probe location from paging anyone. With one region, `TargetDown` behaves like a plain "down" alert. The rules have unit tests in `rules.test.yml`; run them with `promtool test rules deploy/prometheus/rules.test.yml`. CI runs them too.
 
 ## Grafana dashboard
 
@@ -107,17 +115,29 @@ Needs `docker`, [`kind`](https://kind.sigs.k8s.io/) and `kubectl`. The image is 
 deploy/k8s/
   base/                 Pulsewatch Deployment, Service, PVC, targets ConfigMap (targets.yaml)
   monitoring/           Prometheus + Grafana Deployments/Services
-  overlays/kind/        namespace, local image tag, region=kind-local
+  overlays/kind/        single region: everything in one namespace, region=kind-local
+  overlays/multi-region/ one namespace per region (eu-sim, us-sim) + shared monitoring namespace
   kind-config.yaml
-deploy/prometheus/      shared by compose and k8s (kustomization.yaml turns it into a ConfigMap)
+deploy/prometheus/      rules.yml shared by compose and k8s; prometheus.yml (compose) / prometheus-k8s.yml (k8s SD)
 deploy/grafana/         shared by compose and k8s
 ```
 
-- **One config, two runtimes.** Compose and Kubernetes use the same Prometheus config, alert rules, Grafana provisioning and dashboard. The Service names (`pulsewatch`, `prometheus`, `grafana`) match the compose service names, so those files work unchanged.
+- **One config, two runtimes.** Compose and Kubernetes share the alert rules, Grafana provisioning and the dashboard. The only difference is scraping: compose scrapes `pulsewatch:8000`, while in-cluster Prometheus uses Kubernetes service discovery (`prometheus-k8s.yml`, with a read-only ClusterRole) to find every Pulsewatch pod in any namespace.
 - **Targets** for the cluster live in `deploy/k8s/base/targets.yaml`. The ConfigMap name carries a content hash, so editing the file and re-applying rolls out the pod automatically.
 - **Storage:** SQLite on a 1Gi PVC with `replicas: 1` and `strategy: Recreate`, so there is only ever one writer. You scale Pulsewatch by adding regions, not replicas (roadmap item 4).
 - **Hardening:** every container runs non-root with a read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token and memory limits.
 - **CI:** `k8s-manifests` renders the overlay and validates it with `kubeconform -strict` against Kubernetes 1.30. `kind` deploys the overlay to a real kind cluster and checks the API, the Prometheus scrape, the Grafana dashboard and datasource, and that results survive a pod restart.
+
+### Multi-region
+
+```bash
+make kind-up OVERLAY=deploy/k8s/overlays/multi-region
+make k8s-forward API_NS=pulsewatch-eu
+```
+
+Each region is a Pulsewatch agent in its own namespace (`pulsewatch-eu`, `pulsewatch-us`) with its own `PULSEWATCH_REGION`, probing the same targets. One Prometheus in `pulsewatch` discovers all agents through the Kubernetes API. Adding a region is a copy of `region-us/` with a new name, and Prometheus needs no changes. The Grafana `Region` dropdown and the alerts above use the `region` label.
+
+These "regions" all share one machine, so they show the multi-region design (discovery, labelling, consensus alerting) rather than real geographic diversity. Real regions are the same manifests applied to clusters in different places, with Prometheus federation or remote-write on top.
 
 ## Design
 
@@ -150,7 +170,7 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 1. ~~**v0.1:** core probe service, REST API, Prometheus metrics, Docker, CI~~ ✅
 2. ~~Grafana dashboard provisioned in compose~~ ✅
 3. ~~Kubernetes manifests (Kustomize) running on kind/k3d~~ ✅ (a Helm chart can come later if it's needed; Kustomize is already enough for ArgoCD)
-4. Multi-region: probe agents in separate namespaces/clusters with distinct `region` labels, one Prometheus scraping all of them
+4. ~~Multi-region: probe agents in separate namespaces with distinct `region` labels, one Prometheus discovering all of them, consensus alerting~~ ✅
 5. Terraform for the local platform (kind cluster, namespaces, monitoring stack)
 6. ArgoCD GitOps deploys
 7. Alert routing (Alertmanager to Telegram or email)

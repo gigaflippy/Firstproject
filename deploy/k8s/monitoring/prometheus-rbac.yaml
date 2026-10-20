@@ -1,0 +1,27 @@
+# Read-only pod discovery for Prometheus across namespaces (one namespace per region).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pulsewatch-prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pulsewatch-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pulsewatch-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: default   # rewritten to the overlay's namespace by kustomize

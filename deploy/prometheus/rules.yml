@@ -10,13 +10,26 @@ groups:
 
   - name: pulsewatch.alerts
     rules:
+      # A target is only paged as down when every region that probes it agrees.
+      # With a single region this is the same as "down from that region".
       - alert: TargetDown
-        expr: pulsewatch_up == 0
+        expr: max by (target) (pulsewatch_up) == 0
         for: 2m
         labels:
           severity: page
         annotations:
-          summary: "{{ $labels.target }} is down from {{ $labels.region }}"
+          summary: "{{ $labels.target }} is down from every region"
+      # Down from some regions but up from others: a regional or network-path issue,
+      # or a problem with the probe location itself. Worth a look, not a page.
+      - alert: TargetDownInSomeRegions
+        expr: |
+          (pulsewatch_up == 0)
+            and on (target) (max by (target) (pulsewatch_up) == 1)
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.target }} is down from {{ $labels.region }} but up elsewhere"
       - alert: TargetSlow
         expr: pulsewatch:latency_p95_seconds > 2
         for: 10m
