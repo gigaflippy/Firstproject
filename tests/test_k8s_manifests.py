@@ -23,6 +23,9 @@ BASE = K8S / "base"
 MONITORING = K8S / "monitoring"
 OVERLAY = K8S / "overlays" / "kind"
 PROM_CONFIG = ROOT / "deploy" / "prometheus" / "prometheus.yml"
+PROM_K8S_CONFIG = ROOT / "deploy" / "prometheus" / "prometheus-k8s.yml"
+MULTI = K8S / "overlays" / "multi-region"
+CLUSTER_SCOPED = {"Namespace", "ClusterRole", "ClusterRoleBinding"}
 GRAFANA_DATASOURCE = ROOT / "deploy" / "grafana" / "provisioning" / "datasources" / "prometheus.yml"
 
 
@@ -101,7 +104,8 @@ def test_containers_are_hardened(name):
     pod = dep["spec"]["template"]["spec"]
     c = _container(dep)
     assert pod["securityContext"]["runAsNonRoot"] is True
-    assert pod["automountServiceAccountToken"] is False
+    # Only Prometheus gets an API token, for pod discovery.
+    assert pod["automountServiceAccountToken"] is (name == "prometheus")
     # Service env injection would set PULSEWATCH_PORT=tcp://... and crash Settings().
     assert pod["enableServiceLinks"] is False
     assert c["securityContext"]["allowPrivilegeEscalation"] is False
@@ -112,8 +116,8 @@ def test_containers_are_hardened(name):
 
 
 def test_services_match_shared_config_hostnames():
-    """compose and k8s share deploy/prometheus and deploy/grafana, so Service names/ports
-    must match the hosts those files point at."""
+    """The compose scrape target and the Grafana datasource URL are hostnames; in k8s they
+    resolve to these Services, so names and ports must line up."""
     prom = yaml.safe_load(PROM_CONFIG.read_text())
     [scrape_target] = prom["scrape_configs"][0]["static_configs"][0]["targets"]
     host, port = scrape_target.split(":")
@@ -148,5 +152,65 @@ def test_overlay_renders():
     workloads = {d["metadata"]["name"] for d in docs if d["kind"] == "Deployment"}
     assert workloads == {"pulsewatch", "prometheus", "grafana"}
     assert all(
-        d["metadata"].get("namespace") == "pulsewatch" for d in docs if d["kind"] != "Namespace"
+        d["metadata"].get("namespace") == "pulsewatch"
+        for d in docs
+        if d["kind"] not in CLUSTER_SCOPED
     )
+
+
+def _kustomize() -> list[str] | None:
+    if shutil.which("kustomize"):
+        return ["kustomize", "build"]
+    if shutil.which("kubectl"):
+        return ["kubectl", "kustomize"]
+    return None
+
+
+def test_k8s_service_discovery_matches_pod_template():
+    sd = yaml.safe_load(PROM_K8S_CONFIG.read_text())["scrape_configs"][0]
+    [selector] = sd["kubernetes_sd_configs"][0]["selectors"]
+    key, value = selector["label"].split("=")
+    template = _find("Deployment", "pulsewatch")["spec"]["template"]
+    assert template["metadata"]["labels"][key] == value
+    ann = template["metadata"]["annotations"]
+    assert ann["prometheus.io/scrape"] == "true"
+    assert (
+        int(ann["prometheus.io/port"])
+        == _container(_find("Deployment", "pulsewatch"))["ports"][0]["containerPort"]
+    )
+    assert sd["job_name"] == "pulsewatch"  # dashboard and CI query up{job="pulsewatch"}
+
+
+def test_prometheus_rbac_is_read_only():
+    docs = _docs(MONITORING / "prometheus-rbac.yaml")
+    [role] = [d for d in docs if d["kind"] == "ClusterRole"]
+    for rule in role["rules"]:
+        assert set(rule["verbs"]) <= {"get", "list", "watch"}
+        assert "secrets" not in rule["resources"]
+    pod = _find("Deployment", "prometheus")["spec"]["template"]["spec"]
+    [sa] = [d for d in docs if d["kind"] == "ServiceAccount"]
+    assert pod["serviceAccountName"] == sa["metadata"]["name"]
+
+
+@pytest.mark.skipif(_kustomize() is None, reason="no kustomize/kubectl")
+def test_multi_region_overlay():
+    out = subprocess.run(
+        [*_kustomize(), str(MULTI)], check=True, capture_output=True, text=True
+    ).stdout
+    docs = [d for d in yaml.safe_load_all(out) if d]
+    agents = [
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "pulsewatch"
+    ]
+    regions = {_env(_container(d))["PULSEWATCH_REGION"] for d in agents}
+    namespaces = {d["metadata"]["namespace"] for d in agents}
+    assert len(agents) >= 2
+    assert len(regions) == len(agents), "each agent needs a distinct region"
+    assert len(namespaces) == len(agents), "one namespace per region"
+    assert "pulsewatch" not in namespaces  # monitoring namespace stays separate
+
+    monitoring = [
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] != "pulsewatch"
+    ]
+    assert {d["metadata"]["namespace"] for d in monitoring} == {"pulsewatch"}
+    [binding] = [d for d in docs if d["kind"] == "ClusterRoleBinding"]
+    assert binding["subjects"][0]["namespace"] == "pulsewatch"

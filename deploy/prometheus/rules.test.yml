@@ -1,0 +1,74 @@
+# Unit tests for rules.yml:  promtool test rules deploy/prometheus/rules.test.yml
+rule_files:
+  - rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: down everywhere pages, regional outage only warns
+    interval: 15s
+    input_series:
+      # api: down from both regions
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '0x40'
+      - series: 'pulsewatch_up{target="api", region="us"}'
+        values: '0x40'
+      # web: down from eu only
+      - series: 'pulsewatch_up{target="web", region="eu"}'
+        values: '0x40'
+      - series: 'pulsewatch_up{target="web", region="us"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels: { severity: page, target: api }
+            exp_annotations: { summary: "api is down from every region" }
+      - eval_time: 3m
+        alertname: TargetDownInSomeRegions
+        exp_alerts: []   # not yet: needs 5m
+      - eval_time: 6m
+        alertname: TargetDownInSomeRegions
+        exp_alerts:
+          - exp_labels: { severity: warn, target: web, region: eu }
+            exp_annotations: { summary: "web is down from eu but up elsewhere" }
+
+  - name: single region behaves like a plain down alert
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="local"}'
+        values: '1x4 0x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels: { severity: page, target: api }
+            exp_annotations: { summary: "api is down from every region" }
+      - eval_time: 4m
+        alertname: TargetDownInSomeRegions
+        exp_alerts: []
+
+  - name: brief blip does not page
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '1 0 0 0 1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: uptime recording rule
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '1x119 0x120'   # 30m up, then 30m down
+    promql_expr_test:
+      - expr: pulsewatch:uptime_ratio_1h
+        eval_time: 59m45s
+        exp_samples:
+          - labels: 'pulsewatch:uptime_ratio_1h{target="api", region="eu"}'
+            value: 0.5

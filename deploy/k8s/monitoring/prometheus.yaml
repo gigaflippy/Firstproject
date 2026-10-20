@@ -16,7 +16,9 @@ spec:
       labels:
         app.kubernetes.io/name: prometheus
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: prometheus
+      # Needed for kubernetes_sd_configs; the account can only read pods.
+      automountServiceAccountToken: true
       # No Docker-link style env vars: the "pulsewatch" Service would inject
       # PULSEWATCH_PORT=tcp://... and collide with the app's PULSEWATCH_* settings.
       enableServiceLinks: false

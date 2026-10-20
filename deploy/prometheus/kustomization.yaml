@@ -1,8 +1,9 @@
-# Lets Kubernetes reuse the exact files docker compose mounts (see deploy/k8s/monitoring).
+# Turns the shared files into the in-cluster Prometheus ConfigMap (see deploy/k8s/monitoring).
+# rules.yml is shared with docker compose; the scrape config is the Kubernetes-SD variant.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 configMapGenerator:
   - name: prometheus-config
     files:
-      - prometheus.yml
+      - prometheus.yml=prometheus-k8s.yml
       - rules.yml

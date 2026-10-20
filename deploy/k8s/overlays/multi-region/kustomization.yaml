@@ -1,0 +1,10 @@
+# Multi-region on one local cluster: one namespace per probe region, one Prometheus
+# (namespace "pulsewatch") discovering all of them, one Grafana.
+#   make kind-up OVERLAY=deploy/k8s/overlays/multi-region
+# Add a region: copy region-us/, change the namespace and region name, list it below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - monitoring
+  - region-eu
+  - region-us
