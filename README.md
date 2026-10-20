@@ -2,7 +2,7 @@
 
 Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, stores results, serves uptime/latency stats over a REST API, and exposes Prometheus metrics. It is built to run entirely on local infrastructure (Docker, local Kubernetes) at zero cost.
 
-> Status: **v0.1, the core service.** Each probe instance carries a `region` label so several instances can feed one Prometheus. Multi-region agents, Kubernetes manifests, Terraform and ArgoCD are on the [roadmap](#roadmap).
+> Status: **v0.1 core + Grafana dashboard.** Each probe instance carries a `region` label so several instances can feed one Prometheus. Kubernetes manifests, multi-region agents, Terraform and ArgoCD are on the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -14,6 +14,7 @@ docker compose up --build
 - API: http://localhost:8000/docs
 - Metrics: http://localhost:8000/metrics
 - Prometheus: http://localhost:9090 (try `pulsewatch_up` or `pulsewatch:latency_p95_seconds`)
+- Grafana: http://localhost:3000 (opens on the Pulsewatch dashboard; anonymous read-only, `admin`/`admin` to edit)
 
 Without Docker:
 
@@ -70,6 +71,26 @@ Runtime settings come from environment variables:
 
 `deploy/prometheus/` includes recording rules for 1h uptime ratio and p95 latency, plus a `TargetDown` alert (down for 2 minutes).
 
+## Grafana dashboard
+
+`docker compose up` also starts Grafana with the Prometheus datasource and the **Pulsewatch overview** dashboard provisioned from `deploy/grafana/`. Nothing to click through.
+
+| Panel | Query basis |
+|---|---|
+| Targets up / down, current status per target | `pulsewatch_up` |
+| Uptime over the selected time range | `avg_over_time(pulsewatch_up[$__range])` |
+| Up/down history (state timeline) | `pulsewatch_up` |
+| Latency p95 / p50 | `pulsewatch:latency_p95_seconds`, `histogram_quantile(0.5, …)` |
+| Uptime last 1h | `pulsewatch:uptime_ratio_1h` |
+| Failed probes per minute | `rate(pulsewatch_probes_total{result="down"}[5m])` |
+| Firing alerts | `ALERTS{alertname=~"Target.*"}` |
+
+`Region` and `Target` dropdowns filter every panel, so the same dashboard works once several regions report into one Prometheus.
+
+The dashboard is provisioned read-only. To change it, edit it in the UI, export the JSON, and replace `deploy/grafana/dashboards/pulsewatch.json`. `tests/test_deploy_config.py` fails if a panel queries a metric that the code or the recording rules don't produce, so renames can't silently blank a panel.
+
+Set `GRAFANA_ADMIN_PASSWORD` before starting if port 3000 is reachable from other machines.
+
 ## Design
 
 ```
@@ -94,12 +115,12 @@ ruff check . && ruff format --check .
 pytest
 ```
 
-CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, and a Docker build on every push and PR.
+CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with a smoke test, and a full-stack job that runs `promtool check config`, brings up the compose stack, and checks that Prometheus is scraping Pulsewatch and Grafana serves the provisioned dashboard and a healthy datasource.
 
 ## Roadmap
 
-1. **v0.1:** core probe service, REST API, Prometheus metrics, Docker, CI *(this)*
-2. Grafana dashboard provisioned in compose
+1. ~~**v0.1:** core probe service, REST API, Prometheus metrics, Docker, CI~~ ✅
+2. ~~Grafana dashboard provisioned in compose~~ ✅
 3. Kubernetes manifests and Helm chart, running on kind/k3d
 4. Multi-region: probe agents in separate namespaces/clusters with distinct `region` labels, one Prometheus scraping all of them
 5. Terraform for the local platform (kind cluster, namespaces, monitoring stack)
