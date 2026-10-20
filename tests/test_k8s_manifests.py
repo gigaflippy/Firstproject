@@ -74,6 +74,15 @@ def test_pulsewatch_container_matches_app_settings(tmp_path):
         assert c[probe]["httpGet"]["path"] in routes
 
 
+def test_settings_reject_injected_service_env(monkeypatch):
+    """Documents why enableServiceLinks must stay false: Kubernetes would inject this."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("PULSEWATCH_PORT", "tcp://10.96.0.10:8000")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_pulsewatch_runs_as_dockerfile_user():
     dockerfile = (ROOT / "Dockerfile").read_text()
     pod = _find("Deployment", "pulsewatch")["spec"]["template"]["spec"]
@@ -93,6 +102,8 @@ def test_containers_are_hardened(name):
     c = _container(dep)
     assert pod["securityContext"]["runAsNonRoot"] is True
     assert pod["automountServiceAccountToken"] is False
+    # Service env injection would set PULSEWATCH_PORT=tcp://... and crash Settings().
+    assert pod["enableServiceLinks"] is False
     assert c["securityContext"]["allowPrivilegeEscalation"] is False
     assert c["securityContext"]["readOnlyRootFilesystem"] is True
     assert c["securityContext"]["capabilities"]["drop"] == ["ALL"]

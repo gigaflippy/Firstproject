@@ -23,6 +23,9 @@ spec:
         prometheus.io/path: /metrics
     spec:
       automountServiceAccountToken: false
+      # No Docker-link style env vars: the "pulsewatch" Service would inject
+      # PULSEWATCH_PORT=tcp://... and collide with the app's PULSEWATCH_* settings.
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
