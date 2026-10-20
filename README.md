@@ -91,6 +91,34 @@ The dashboard is provisioned read-only. To change it, edit it in the UI, export 
 
 Set `GRAFANA_ADMIN_PASSWORD` before starting if port 3000 is reachable from other machines.
 
+## Kubernetes (kind / k3d)
+
+The same stack runs on a local cluster: Pulsewatch, Prometheus and Grafana in the `pulsewatch` namespace. It's built with Kustomize, so you only need `kubectl` and nothing has to be installed in the cluster.
+
+```bash
+make kind-up        # create kind cluster, build + load image, apply, wait for rollouts
+make k8s-forward    # API :8000, Prometheus :9090, Grafana :3000
+make kind-down
+```
+
+Needs `docker`, [`kind`](https://kind.sigs.k8s.io/) and `kubectl`. The image is built locally and loaded into the cluster with `kind load`, so no registry and no account are needed. For **k3d**, replace the load step with `k3d image import pulsewatch:dev -c <cluster>` and run `kubectl apply -k deploy/k8s/overlays/kind`.
+
+```
+deploy/k8s/
+  base/                 Pulsewatch Deployment, Service, PVC, targets ConfigMap (targets.yaml)
+  monitoring/           Prometheus + Grafana Deployments/Services
+  overlays/kind/        namespace, local image tag, region=kind-local
+  kind-config.yaml
+deploy/prometheus/      shared by compose and k8s (kustomization.yaml turns it into a ConfigMap)
+deploy/grafana/         shared by compose and k8s
+```
+
+- **One config, two runtimes.** Compose and Kubernetes use the same Prometheus config, alert rules, Grafana provisioning and dashboard. The Service names (`pulsewatch`, `prometheus`, `grafana`) match the compose service names, so those files work unchanged.
+- **Targets** for the cluster live in `deploy/k8s/base/targets.yaml`. The ConfigMap name carries a content hash, so editing the file and re-applying rolls out the pod automatically.
+- **Storage:** SQLite on a 1Gi PVC with `replicas: 1` and `strategy: Recreate`, so there is only ever one writer. You scale Pulsewatch by adding regions, not replicas (roadmap item 4).
+- **Hardening:** every container runs non-root with a read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token and memory limits.
+- **CI:** `k8s-manifests` renders the overlay and validates it with `kubeconform -strict` against Kubernetes 1.30. `kind` deploys the overlay to a real kind cluster and checks the API, the Prometheus scrape, the Grafana dashboard and datasource, and that results survive a pod restart.
+
 ## Design
 
 ```
@@ -121,7 +149,7 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 
 1. ~~**v0.1:** core probe service, REST API, Prometheus metrics, Docker, CI~~ ✅
 2. ~~Grafana dashboard provisioned in compose~~ ✅
-3. Kubernetes manifests and Helm chart, running on kind/k3d
+3. ~~Kubernetes manifests (Kustomize) running on kind/k3d~~ ✅ (a Helm chart can come later if it's needed; Kustomize is already enough for ArgoCD)
 4. Multi-region: probe agents in separate namespaces/clusters with distinct `region` labels, one Prometheus scraping all of them
 5. Terraform for the local platform (kind cluster, namespaces, monitoring stack)
 6. ArgoCD GitOps deploys

@@ -1,0 +1,8 @@
+# Lets Kubernetes reuse the exact files docker compose mounts (see deploy/k8s/monitoring).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml
+      - rules.yml

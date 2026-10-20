@@ -1,0 +1,15 @@
+# Prometheus + Grafana, configured from the same files as docker compose.
+# Service names (prometheus, grafana) match compose so the configs work unchanged.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: pulsewatch
+    includeSelectors: false
+
+resources:
+  - ../../prometheus
+  - ../../grafana
+  - prometheus.yaml
+  - grafana.yaml

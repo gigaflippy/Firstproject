@@ -1,0 +1,15 @@
+# Targets probed by the in-cluster Pulsewatch. Edit, then `make kind-up` (or kubectl apply -k) to roll out.
+targets:
+  - name: example
+    url: https://example.com
+    interval_seconds: 30
+    timeout_seconds: 5
+  - name: github-api
+    url: https://api.github.com
+    interval_seconds: 60
+    expected_status: [200]
+  - name: cloudflare-dns
+    url: https://1.1.1.1
+    method: HEAD
+    interval_seconds: 30
+    expected_status: [200, 301, 302]

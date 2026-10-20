@@ -1,0 +1,6 @@
+# kind create cluster --config deploy/k8s/kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pulsewatch
+nodes:
+  - role: control-plane
