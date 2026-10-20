@@ -45,7 +45,7 @@ Open questions from nightly runs. Answer under **Georgi's answer** (one line is 
 
 ## D-002 — Terraform or OpenTofu for the local platform (roadmap item 5)? (opened 2026-10-20)
 
-**Status:** open — waiting on Georgi. Until it's answered, nightly runs **skip item 5 and work on item 6 (ArgoCD)**, which doesn't depend on it.
+**Status:** resolved — Terraform (2026-10-20)
 
 **Context.** Item 5 is infrastructure-as-code for the local platform: create the kind cluster, the namespaces and the monitoring stack from code instead of `make kind-up`. Since 2023, HashiCorp Terraform is under the BUSL 1.1 licence (source-available, not open source). OpenTofu is the Linux Foundation fork under MPL 2.0. It's a drop-in replacement: same HCL, same providers (`tehcyx/kind`, `hashicorp/kubernetes`), same workflow (`tofu plan/apply` instead of `terraform plan/apply`). Using either one for a personal portfolio project is free and allowed. The choice is about what you want the repo to say about you, and it's a licensing call, so it's yours.
 
@@ -64,5 +64,4 @@ Open questions from nightly runs. Answer under **Georgi's answer** (one line is 
 
 **Recommendation:** Option 1, with a README note that it runs unchanged on OpenTofu. If you care about open-source licensing, Option 3.
 
-**Georgi's answer:**
-
+**Georgi's answer:** Terraform (2026-10-20): it's what job postings ask for. The README notes it also runs on OpenTofu.
