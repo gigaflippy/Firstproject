@@ -1,0 +1,33 @@
+# Local kind/k3d cluster: app + monitoring in the "pulsewatch" namespace.
+#   make kind-up           (create cluster, build + load image, apply, wait)
+#   kubectl apply -k deploy/k8s/overlays/kind
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: pulsewatch
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - ../../monitoring
+
+images:
+  # Built locally and loaded with `kind load docker-image`; never pulled from a registry.
+  - name: pulsewatch
+    newName: pulsewatch
+    newTag: dev
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: pulsewatch
+      spec:
+        template:
+          spec:
+            containers:
+              - name: pulsewatch
+                env:
+                  - name: PULSEWATCH_REGION
+                    value: kind-local

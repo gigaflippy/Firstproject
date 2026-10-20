@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # Named "pulsewatch" so deploy/prometheus/prometheus.yml (pulsewatch:8000) works unchanged in-cluster.
+  name: pulsewatch
+  labels:
+    app.kubernetes.io/name: pulsewatch
+spec:
+  selector:
+    app.kubernetes.io/name: pulsewatch
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

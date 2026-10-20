@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulsewatch
+  labels:
+    app.kubernetes.io/name: pulsewatch
+spec:
+  # SQLite on a ReadWriteOnce volume: exactly one writer. Scale out by adding
+  # regions (one Deployment per region), not replicas.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulsewatch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulsewatch
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pulsewatch
+          image: pulsewatch
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: PULSEWATCH_REGION
+              value: local
+            - name: PULSEWATCH_DB_PATH
+              value: /data/pulsewatch.db
+            - name: PULSEWATCH_TARGETS_FILE
+              value: /config/targets.yaml
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: targets
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: targets
+          configMap:
+            name: pulsewatch-targets
+        - name: data
+          persistentVolumeClaim:
+            claimName: pulsewatch-data
+        - name: tmp
+          emptyDir: {}
