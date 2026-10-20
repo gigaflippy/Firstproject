@@ -47,3 +47,36 @@ jobs:
             -e PULSEWATCH_SCHEDULER_ENABLED=false pulsewatch:ci
           for i in $(seq 1 20); do curl -fs localhost:8000/healthz && exit 0; sleep 1; done
           docker logs pw; exit 1
+
+  stack:
+    # Brings up the full compose stack and checks Prometheus and Grafana are wired together.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool check
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml
+      - run: docker compose up -d --build
+      - name: Prometheus scrapes Pulsewatch
+        run: |
+          for i in $(seq 1 30); do
+            curl -fs 'localhost:9090/api/v1/query?query=up%7Bjob%3D%22pulsewatch%22%7D' \
+              | grep -q '"value":\[[0-9.]*,"1"\]' && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Grafana serves the provisioned dashboard and datasource
+        run: |
+          for i in $(seq 1 30); do
+            curl -fs localhost:3000/api/health && break; sleep 2
+          done
+          curl -fs localhost:3000/api/dashboards/uid/pulsewatch-overview | grep -q '"title":"Pulsewatch overview"'
+          curl -fs -u admin:admin localhost:3000/api/datasources/uid/pulsewatch-prometheus/health \
+            | grep -q '"status":"OK"'
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+      - run: docker compose down -v
+        if: always()
