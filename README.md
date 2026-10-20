@@ -139,6 +139,26 @@ Each region is a Pulsewatch agent in its own namespace (`pulsewatch-eu`, `pulsew
 
 These "regions" all share one machine, so they show the multi-region design (discovery, labelling, consensus alerting) rather than real geographic diversity. Real regions are the same manifests applied to clusters in different places, with Prometheus federation or remote-write on top.
 
+### Terraform
+
+The whole local platform as code: the kind cluster, the Pulsewatch image built and loaded into it, and the overlay applied (monitoring plus probe regions).
+
+```bash
+cd infra/terraform
+terraform init
+terraform apply                        # overlay=multi-region by default
+terraform apply -var overlay=kind      # single region instead
+export KUBECONFIG=$(terraform output -raw kubeconfig_path)
+terraform destroy
+```
+
+- **Providers:** `tehcyx/kind` creates the cluster and `kbst/kustomization` applies the same Kustomize overlays that `kubectl apply -k` uses. There's one source of manifests, applied in priority order (namespaces and RBAC, then workloads).
+- **Image:** rebuilt and reloaded only when `src/`, the `Dockerfile` or `pyproject.toml` change (content hash), so a second `terraform apply` changes nothing.
+- **State** stays local and is git-ignored, along with the generated `kubeconfig`. No backend or account is needed.
+- **Needs** `terraform`, `docker` and `kind` (for `kind load`).
+- **CI** (`terraform` job): `fmt -check`, `validate`, a real `apply` to a fresh kind cluster, a health check that Prometheus sees both regions, a `plan -detailed-exitcode` that must show no changes, then `destroy`.
+- Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`).
+
 ## Design
 
 ```
@@ -171,6 +191,6 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 2. ~~Grafana dashboard provisioned in compose~~ ✅
 3. ~~Kubernetes manifests (Kustomize) running on kind/k3d~~ ✅ (a Helm chart can come later if it's needed; Kustomize is already enough for ArgoCD)
 4. ~~Multi-region: probe agents in separate namespaces with distinct `region` labels, one Prometheus discovering all of them, consensus alerting~~ ✅
-5. Terraform for the local platform (kind cluster, namespaces, monitoring stack)
+5. ~~Terraform for the local platform (kind cluster, image, monitoring stack, regions)~~ ✅
 6. ArgoCD GitOps deploys
 7. Alert routing (Alertmanager to Telegram or email)
