@@ -147,8 +147,12 @@ jobs:
       - name: Diagnostics on failure
         if: failure()
         run: |
-          kubectl -n pulsewatch get all,pvc,cm
-          kubectl -n pulsewatch describe pods
-          kubectl -n pulsewatch logs deploy/pulsewatch --tail=100 || true
-          kubectl -n pulsewatch logs deploy/prometheus --tail=50 || true
-          kubectl -n pulsewatch logs deploy/grafana --tail=50 || true
+          # Emitted as annotations so they're readable from the PR checks page and the API.
+          annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          kubectl -n pulsewatch get all,pvc,cm 2>&1 | annotate "kubectl get"
+          kubectl -n pulsewatch get events --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
+          for d in pulsewatch prometheus grafana; do
+            { kubectl -n pulsewatch get pods -l app.kubernetes.io/name=$d -o wide; \
+              kubectl -n pulsewatch logs deploy/$d --tail=60 --all-containers 2>&1; \
+              kubectl -n pulsewatch logs deploy/$d --previous --tail=60 2>&1; } | annotate "$d"
+          done
