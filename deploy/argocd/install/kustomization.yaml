@@ -1,0 +1,37 @@
+# Argo CD itself, pinned to a release. Apply server-side (the CRDs are too big for
+# client-side apply's last-applied annotation):
+#   kubectl apply --server-side --force-conflicts -k deploy/argocd/install
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+resources:
+  - namespace.yaml
+  - https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.12/manifests/install.yaml
+
+patches:
+  # Plain HTTP behind `kubectl port-forward`: no self-signed certificate warning locally.
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: argocd-cmd-params-cm
+      data:
+        server.insecure: "true"
+  # Poll Git every 60s instead of ~3m, so a merged change shows up quickly on a laptop.
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: argocd-cm
+      data:
+        timeout.reconciliation: 60s
+  # No SSO locally (admin login only), so Dex isn't needed.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: argocd-dex-server
+      spec:
+        replicas: 0

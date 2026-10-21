@@ -2,7 +2,7 @@
 
 Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, stores results, serves uptime/latency stats over a REST API, and exposes Prometheus metrics. It is built to run entirely on local infrastructure (Docker, local Kubernetes) at zero cost.
 
-> Status: **v0.1 core + Grafana dashboard.** Each probe instance carries a `region` label so several instances can feed one Prometheus. Kubernetes manifests, multi-region agents, Terraform and ArgoCD are on the [roadmap](#roadmap).
+> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps.** Alert routing is next on the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -118,6 +118,9 @@ deploy/k8s/
   overlays/kind/        single region: everything in one namespace, region=kind-local
   overlays/multi-region/ one namespace per region (eu-sim, us-sim) + shared monitoring namespace
   kind-config.yaml
+deploy/argocd/
+  install/              Argo CD, pinned release (kubectl apply --server-side -k)
+  bootstrap/            AppProject + ApplicationSet: one Application per overlays/multi-region/* dir
 deploy/prometheus/      rules.yml shared by compose and k8s; prometheus.yml (compose) / prometheus-k8s.yml (k8s SD)
 deploy/grafana/         shared by compose and k8s
 ```
@@ -159,6 +162,35 @@ terraform destroy
 - **CI** (`terraform` job): `fmt -check`, `validate`, a real `apply` to a fresh kind cluster, a health check that Prometheus sees both regions, a `plan -detailed-exitcode` that must show no changes, then `destroy`.
 - Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`).
 
+### GitOps with Argo CD
+
+Argo CD runs in the cluster and deploys the multi-region stack **from Git**. A commit to the default branch is live within about a minute, and anything changed by hand in the cluster is put back.
+
+```bash
+make argocd-up                        # kind cluster + image, Argo CD, then Argo CD syncs from GitHub
+make argocd-status                    # Applications, sync/health, deployed commit
+make argocd-ui                        # http://localhost:8080, prints the admin password
+make argocd-up ARGOCD_REVISION=my-branch   # deploy a branch or commit instead of HEAD
+```
+
+```
+GitHub (this repo) ──poll 60s──► argocd-repo-server ──► ApplicationSet "pulsewatch"
+                                                          │ git directory generator:
+                                                          │ deploy/k8s/overlays/multi-region/*
+                         ┌────────────────────────────────┼─────────────────────────┐
+                         ▼                                ▼                         ▼
+              pulsewatch-monitoring          pulsewatch-region-eu       pulsewatch-region-us
+              (Prometheus, Grafana)          (agent, eu-sim)            (agent, us-sim)
+              automated sync · prune · self-heal · AppProject "pulsewatch"
+```
+
+- **Same manifests, third way to apply them.** Argo CD runs the same Kustomize overlays as `kubectl apply -k` and Terraform. Nothing is duplicated for GitOps.
+- **ApplicationSet, not hand-written Applications.** Each directory under `overlays/multi-region/` becomes an Application. To add a region, copy `region-us/`, rename it, list it in the overlay and push. Argo CD creates the new Application on its own.
+- **Least privilege.** The `pulsewatch` AppProject allows one source repo, `pulsewatch*` namespaces and only the cluster-scoped kinds the overlays contain (Namespace, ClusterRole, ClusterRoleBinding). `tests/test_argocd.py` fails if a manifest needs more or the project allows more than it needs.
+- **Image.** Argo CD syncs manifests; the image is still built locally and side-loaded with `kind load` (no registry, no account). The repo is public, so Argo CD needs no Git credentials.
+- **Local tweaks** (`deploy/argocd/install`): plain HTTP for port-forwarding, 60s Git polling instead of ~3m, and no Dex since there's no SSO.
+- **CI** (`argocd` job): installs Argo CD on kind, points the ApplicationSet at the **commit under test**, waits until every Application is Synced and Healthy at that exact SHA, checks Prometheus sees both regions, then deletes a Deployment by hand and checks Argo CD puts it back.
+
 ## Design
 
 ```
@@ -192,5 +224,5 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 3. ~~Kubernetes manifests (Kustomize) running on kind/k3d~~ ✅ (a Helm chart can come later if it's needed; Kustomize is already enough for ArgoCD)
 4. ~~Multi-region: probe agents in separate namespaces with distinct `region` labels, one Prometheus discovering all of them, consensus alerting~~ ✅
 5. ~~Terraform for the local platform (kind cluster, image, monitoring stack, regions)~~ ✅
-6. ArgoCD GitOps deploys
+6. ~~ArgoCD GitOps deploys (ApplicationSet over the multi-region overlay, automated sync with self-heal, tested on kind in CI)~~ ✅
 7. Alert routing (Alertmanager to Telegram or email)
