@@ -65,3 +65,28 @@ Open questions from nightly runs. Answer under **Georgi's answer** (one line is 
 **Recommendation:** Option 1, with a README note that it runs unchanged on OpenTofu. If you care about open-source licensing, Option 3.
 
 **Georgi's answer:** Terraform (2026-10-20): it's what job postings ask for. The README notes it also runs on OpenTofu.
+
+---
+
+## D-003 — Alert routing: Telegram, email, or both (roadmap item 7)? (opened 2026-10-21)
+
+**Status:** open. Nightly runs skip anything that needs a token or a mail account until this is answered.
+
+**Context.** Item 7 adds Alertmanager to route the existing alerts (`TargetDown` = page, `TargetDownInSomeRegions` / `TargetSlow` = warn) to a real channel. Every real channel needs a credential that only you can create. It must never be committed: it would live in a git-ignored `.env` for compose and in a Kubernetes Secret you create locally. Both options below are free.
+
+**Options.**
+
+1. **Telegram bot.**
+   - + Free, instant, pushes to your phone. Setup is 2 minutes: talk to @BotFather, get a bot token, send the bot a message, read your chat id.
+   - + Alertmanager has a native `telegram_configs` receiver, so there's no glue code.
+   - − You need a Telegram account. The bot token is a secret you keep locally.
+2. **Email over SMTP (e.g. a Gmail app password).**
+   - + Every recruiter understands email alerts. Native `email_configs` receiver.
+   - − Needs 2FA on the Google account plus an app password, which is a credential tied to your main mailbox. Slower, and alerts can land in spam.
+3. **Credential-free first, real channel later.** Build Alertmanager now with the full routing tree (page vs warn, grouping by target, `TargetDown` inhibiting the region and slow alerts for the same target). CI tests it end to end against a local webhook sink. A Telegram/email receiver gets switched on only when a local Secret exists (`make alerts-secret TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=…`), so nothing secret ever touches the repo.
+   - + Next run can start immediately; the interesting part (routing, inhibition, tests) doesn't depend on the credential.
+   - − Until you add a token, alerts only reach the sink and the Alertmanager UI.
+
+**Recommendation:** Option 3 with Telegram as the real channel (Option 1). Answer "3 + Telegram" (or "3 + email") and the next run builds it. You create the bot token yourself whenever you like. No run will ever ask for or store it.
+
+**Georgi's answer:**
