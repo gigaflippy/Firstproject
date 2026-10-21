@@ -4,8 +4,12 @@ NS      ?= pulsewatch
 API_NS  ?= $(NS)   # multi-region: API_NS=pulsewatch-eu (or -us)
 IMAGE   ?= pulsewatch:dev
 OVERLAY ?= deploy/k8s/overlays/kind
+# GitOps: what Argo CD deploys from. HEAD = the repo's default branch.
+GITOPS_REPO     ?= https://github.com/gigaflippy/Firstproject.git
+ARGOCD_REVISION ?= HEAD
 
-.PHONY: help kind-up kind-down k8s-apply k8s-wait k8s-validate k8s-forward k8s-status
+.PHONY: help kind-up kind-down k8s-apply k8s-wait k8s-validate k8s-forward k8s-status \
+	argocd-up argocd-install argocd-bootstrap argocd-wait argocd-status argocd-ui
 
 help:
 	@echo "make kind-up       create kind cluster, build + load image, deploy, wait for rollout"
@@ -14,6 +18,11 @@ help:
 	@echo "make k8s-status    show pods/services in the $(NS) namespace"
 	@echo "make k8s-validate  render manifests and schema-check them (kubectl + kubeconform)"
 	@echo "make kind-down     delete the kind cluster"
+	@echo ""
+	@echo "make argocd-up     GitOps: kind cluster + image, Argo CD, then Argo CD deploys the"
+	@echo "                   multi-region stack from Git (ARGOCD_REVISION=<branch|sha>, default HEAD)"
+	@echo "make argocd-status Argo CD applications with sync/health status"
+	@echo "make argocd-ui     port-forward the Argo CD UI to :8080 and print the admin password"
 
 kind-up:
 	@kind get clusters | grep -qx '$(CLUSTER)' || kind create cluster --config deploy/k8s/kind-config.yaml --name $(CLUSTER)
@@ -53,3 +62,47 @@ k8s-validate:
 
 kind-down:
 	kind delete cluster --name $(CLUSTER)
+
+# --- GitOps with Argo CD -----------------------------------------------------
+# Argo CD pulls the manifests from Git; only the image is side-loaded (no registry).
+
+argocd-up:
+	@kind get clusters | grep -qx '$(CLUSTER)' || kind create cluster --config deploy/k8s/kind-config.yaml --name $(CLUSTER)
+	docker build -t $(IMAGE) .
+	kind load docker-image $(IMAGE) --name $(CLUSTER)
+	$(MAKE) argocd-install argocd-bootstrap argocd-wait
+
+argocd-install:
+	kubectl apply --server-side --force-conflicts -k deploy/argocd/install
+	kubectl wait --for=condition=Established --timeout=60s \
+	  crd/applications.argoproj.io crd/applicationsets.argoproj.io crd/appprojects.argoproj.io
+	kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+	@for d in argocd-repo-server argocd-applicationset-controller argocd-server argocd-redis; do \
+	  kubectl -n argocd rollout status deployment/$$d --timeout=300s || exit 1; \
+	done
+
+argocd-bootstrap:
+	kubectl kustomize deploy/argocd/bootstrap | \
+	  sed -e 's|https://github.com/gigaflippy/Firstproject.git|$(GITOPS_REPO)|' \
+	      -e 's|revision: HEAD|revision: $(ARGOCD_REVISION)|' \
+	      -e 's|targetRevision: HEAD|targetRevision: $(ARGOCD_REVISION)|' | \
+	  kubectl apply -f -
+
+# One Application per overlays/multi-region/* directory, all Synced + Healthy (Argo CD
+# only reports Healthy once the Deployments have rolled out).
+argocd-wait:
+	@want=$$(ls -d deploy/k8s/overlays/multi-region/*/ | wc -l); \
+	for i in $$(seq 1 90); do \
+	  s=$$(kubectl -n argocd get applications -l app.kubernetes.io/part-of=pulsewatch \
+	    -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status}{"\n"}{end}'); \
+	  if [ "$$(echo "$$s" | grep -c '=Synced/Healthy$$')" -eq "$$want" ]; then echo "$$s"; exit 0; fi; \
+	  sleep 5; \
+	done; echo "$$s"; exit 1
+
+argocd-status:
+	kubectl -n argocd get applications -l app.kubernetes.io/part-of=pulsewatch \
+	  -o custom-columns=APP:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status,REVISION:.status.sync.revision
+
+argocd-ui:
+	@echo "Argo CD http://localhost:8080  user admin  password $$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)"
+	kubectl -n argocd port-forward svc/argocd-server 8080:80

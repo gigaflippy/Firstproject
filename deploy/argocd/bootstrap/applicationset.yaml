@@ -1,0 +1,46 @@
+# One Argo CD Application per directory under overlays/multi-region:
+#   pulsewatch-monitoring, pulsewatch-region-eu, pulsewatch-region-us.
+# Adding a region is still "copy region-us/ and commit"; Argo CD picks up the new
+# directory and creates its Application without any change here.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: pulsewatch
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/gigaflippy/Firstproject.git
+        # HEAD = the repo's default branch. `make argocd-bootstrap ARGOCD_REVISION=<ref>`
+        # (and CI, with the commit under test) points everything at another ref.
+        revision: HEAD
+        directories:
+          - path: deploy/k8s/overlays/multi-region/*
+  template:
+    metadata:
+      name: "pulsewatch-{{.path.basename}}"
+      labels:
+        app.kubernetes.io/part-of: pulsewatch
+      # Deleting an Application also deletes what it deployed.
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: pulsewatch
+      source:
+        repoURL: https://github.com/gigaflippy/Firstproject.git
+        targetRevision: HEAD
+        path: "{{.path.path}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: pulsewatch
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m

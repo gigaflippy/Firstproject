@@ -95,6 +95,13 @@ jobs:
             | tar xz -C /usr/local/bin kubeconform
       - run: kubectl kustomize deploy/k8s/overlays/kind > rendered.yaml
       - run: kubeconform -strict -summary -kubernetes-version 1.30.0 rendered.yaml
+      - name: Argo CD bootstrap (AppProject + ApplicationSet) against the CRD schemas
+        run: |
+          kubectl kustomize deploy/argocd/bootstrap | kubeconform -strict -summary -kubernetes-version 1.30.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -
+      - name: Argo CD install renders
+        run: kubectl kustomize deploy/argocd/install > /dev/null
 
   kind:
     # Deploys the overlay to a throwaway kind cluster and checks the whole stack end to end.
@@ -204,6 +211,65 @@ jobs:
           kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
           kubectl -n pulsewatch logs deploy/prometheus --tail=60 2>&1 | annotate "prometheus"
           kubectl -n pulsewatch-eu logs deploy/pulsewatch --tail=40 2>&1 | annotate "pulsewatch-eu"
+
+  argocd:
+    # GitOps end to end: Argo CD on kind deploys the multi-region stack from this
+    # commit on GitHub, then puts back a Deployment that was deleted by hand (self-heal).
+    runs-on: ubuntu-latest
+    needs: [test, k8s-manifests]
+    env:
+      # The commit under test (the PR head on pull_request events, not the merge commit).
+      REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      GITOPS_REPO: ${{ github.server_url }}/${{ github.event.pull_request.head.repo.full_name || github.repository }}.git
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: pulsewatch
+          config: deploy/k8s/kind-config.yaml
+      - run: docker build -t pulsewatch:dev .
+      - run: kind load docker-image pulsewatch:dev --name pulsewatch
+      - run: make argocd-install
+      - run: make argocd-bootstrap ARGOCD_REVISION="$REVISION" GITOPS_REPO="$GITOPS_REPO"
+      - name: Every Application is Synced and Healthy at the commit under test
+        run: |
+          make argocd-wait
+          make argocd-status
+          revs=$(kubectl -n argocd get applications -l app.kubernetes.io/part-of=pulsewatch \
+            -o jsonpath='{range .items[*]}{.status.sync.revision}{"\n"}{end}' | sort -u)
+          echo "synced revisions: $revs"
+          test "$revs" = "$REVISION"
+      - name: Prometheus discovers and scrapes every region
+        run: |
+          kubectl -n pulsewatch port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 &
+          sleep 5
+          q() { curl -fsG localhost:9090/api/v1/query --data-urlencode "query=$1"; }
+          for i in $(seq 1 45); do
+            q 'count(count by (region) (pulsewatch_up))' | grep -q '"value":\[[0-9.]*,"2"\]' && exit 0
+            sleep 2
+          done
+          q 'up{job="pulsewatch"}'; exit 1
+      - name: Self-heal puts back a deleted Deployment
+        run: |
+          kubectl -n pulsewatch-us delete deployment pulsewatch --wait=true
+          for i in $(seq 1 60); do
+            kubectl -n pulsewatch-us get deployment pulsewatch >/dev/null 2>&1 && break
+            sleep 2
+          done
+          kubectl -n pulsewatch-us rollout status deployment/pulsewatch --timeout=180s
+          make argocd-wait
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          echo "revision=$REVISION repo=$GITOPS_REPO" | annotate "inputs"
+          kubectl -n argocd get pods -o wide 2>&1 | annotate "argocd pods"
+          kubectl -n argocd get applicationsets,applications -o yaml 2>&1 | grep -A25 -E '^  status:|conditions:' | annotate "argocd status"
+          kubectl -n argocd logs deploy/argocd-applicationset-controller --tail=40 2>&1 | annotate "applicationset-controller"
+          kubectl -n argocd logs statefulset/argocd-application-controller --tail=40 2>&1 | annotate "application-controller"
+          kubectl -n argocd logs deploy/argocd-repo-server --tail=40 2>&1 | annotate "repo-server"
+          kubectl get pods,svc -A -l app.kubernetes.io/part-of=pulsewatch -o wide 2>&1 | annotate "pulsewatch pods"
+          kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
 
   terraform:
     # infra/terraform: fmt + validate, then a real apply (kind cluster + multi-region stack) and destroy.
