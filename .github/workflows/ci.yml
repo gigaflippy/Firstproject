@@ -229,6 +229,12 @@ jobs:
           config: deploy/k8s/kind-config.yaml
       - run: docker build -t pulsewatch:dev .
       - run: kind load docker-image pulsewatch:dev --name pulsewatch
+      - name: Pre-pull Argo CD images on the runner (retries; registry errors show up here, not as ImagePullBackOff)
+        run: |
+          for img in $(kubectl kustomize deploy/argocd/install | sed -n 's/^ *image: //p' | sort -u | grep -v dexidp); do
+            for i in 1 2 3; do docker pull -q "$img" && break; sleep 10; done || { echo "::error title=pull::$img"; exit 1; }
+            kind load docker-image "$img" --name pulsewatch
+          done
       - run: make argocd-install
       - run: make argocd-bootstrap ARGOCD_REVISION="$REVISION" GITOPS_REPO="$GITOPS_REPO"
       - name: Every Application is Synced and Healthy at the commit under test
@@ -264,6 +270,9 @@ jobs:
           annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
           echo "revision=$REVISION repo=$GITOPS_REPO" | annotate "inputs"
           kubectl -n argocd get pods -o wide 2>&1 | annotate "argocd pods"
+          kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded \
+            -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' 2>/dev/null | head -5 |
+            while read -r ns p; do kubectl -n "$ns" describe pod "$p" 2>&1 | tail -25; done | annotate "not running"
           kubectl -n argocd get applicationsets,applications -o yaml 2>&1 | grep -A25 -E '^  status:|conditions:' | annotate "argocd status"
           kubectl -n argocd logs deploy/argocd-applicationset-controller --tail=40 2>&1 | annotate "applicationset-controller"
           kubectl -n argocd logs statefulset/argocd-application-controller --tail=40 2>&1 | annotate "application-controller"
