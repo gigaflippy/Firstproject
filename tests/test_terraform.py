@@ -43,3 +43,11 @@ def test_state_and_kubeconfig_never_committed():
     ignored = (TF / ".gitignore").read_text().split()
     for pattern in ("*.tfstate", "kubeconfig", ".terraform/"):
         assert pattern in ignored
+
+
+def test_node_image_is_pinned():
+    """Unpinned, the node image follows the provider's default, and a newer node broke
+    `kind load` (containerd config version 4) without any change in this repo."""
+    default = re.search(r'default\s*=\s*"([^"]+)"', _variable_block("node_image")).group(1)
+    assert re.fullmatch(r"kindest/node:v\d+\.\d+\.\d+(@sha256:[0-9a-f]{64})?", default), default
+    assert "node_image      = var.node_image" in (TF / "main.tf").read_text()

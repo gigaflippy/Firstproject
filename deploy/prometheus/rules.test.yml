@@ -72,3 +72,20 @@ tests:
         exp_samples:
           - labels: 'pulsewatch:uptime_ratio_1h{target="api", region="eu"}'
             value: 0.5
+
+  - name: failing notification delivery warns
+    interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{integration="telegram", instance="am"}'
+        values: '0x5 1+1x20'
+      - series: 'alertmanager_notifications_failed_total{integration="webhook", instance="am"}'
+        values: '0x26'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AlertmanagerNotificationsFailing
+        exp_alerts: []   # failing since ~5m, needs 10m
+      - eval_time: 20m
+        alertname: AlertmanagerNotificationsFailing
+        exp_alerts:
+          - exp_labels: { severity: warn, integration: telegram }
+            exp_annotations: { summary: "Alertmanager is failing to deliver telegram notifications" }

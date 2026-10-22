@@ -49,9 +49,13 @@ jobs:
           docker logs pw; exit 1
 
   stack:
-    # Brings up the full compose stack and checks Prometheus and Grafana are wired together.
+    # Brings up the full compose stack: Prometheus scrapes Pulsewatch, Grafana is provisioned,
+    # and alerts travel probe -> rule -> Alertmanager -> alert sink with routing and inhibition.
     runs-on: ubuntu-latest
     needs: test
+    env:
+      # One target that is always down, so TargetDown fires for real (see the fixture).
+      PULSEWATCH_TARGETS: ./tests/fixtures/targets-alerting.yaml
     steps:
       - uses: actions/checkout@v4
       - name: promtool check + rule unit tests
@@ -61,15 +65,31 @@ jobs:
           promtool check config /etc/prometheus/prometheus.yml
           promtool check config /etc/prometheus/prometheus-k8s.yml
           promtool test rules rules.test.yml
-      - run: docker compose up -d --build
-      - name: Prometheus scrapes Pulsewatch
+      - name: amtool check-config + routing tree
         run: |
+          amtool() { docker run --rm --entrypoint amtool \
+            -v "$PWD/deploy/alertmanager:/etc/alertmanager:ro" prom/alertmanager:v0.27.0 "$@"; }
+          amtool check-config /etc/alertmanager/alertmanager.yml
+          routes() { amtool config routes test --config.file=/etc/alertmanager/alertmanager.yml "$@"; }
+          routes --verify.receivers=page  alertname=TargetDown severity=page target=api
+          routes --verify.receivers=warn  alertname=TargetSlow severity=warn target=api
+          routes --verify.receivers=warn  alertname=TargetDownInSomeRegions severity=warn target=api
+          routes --verify.receivers=default alertname=Unlabelled
+          # The Telegram variant, rendered by start.sh exactly as at runtime (fake values).
+          docker run --rm --entrypoint /bin/sh -e TELEGRAM_BOT_TOKEN=123456:ci-fake-token \
+            -e TELEGRAM_CHAT_ID=-100123 -e ALERTMANAGER_CHECK_ONLY=1 \
+            -v "$PWD/deploy/alertmanager:/etc/alertmanager:ro" prom/alertmanager:v0.27.0 /etc/alertmanager/start.sh
+      - run: docker compose up -d --build
+      - name: Prometheus scrapes Pulsewatch and Alertmanager
+        run: |
+          q() { curl -fsG localhost:9090/api/v1/query --data-urlencode "query=$1"; }
           for i in $(seq 1 30); do
-            curl -fs 'localhost:9090/api/v1/query?query=up%7Bjob%3D%22pulsewatch%22%7D' \
-              | grep -q '"value":\[[0-9.]*,"1"\]' && exit 0
+            q 'up{job="pulsewatch"}' | grep -q '"value":\[[0-9.]*,"1"\]' &&
+              q 'up{job="alertmanager"}' | grep -q '"value":\[[0-9.]*,"1"\]' &&
+              curl -fs localhost:9090/api/v1/alertmanagers | grep -q 'alertmanager:9093' && exit 0
             sleep 2
           done
-          exit 1
+          q 'up'; curl -fs localhost:9090/api/v1/alertmanagers; exit 1
       - name: Grafana serves the provisioned dashboard and datasource
         run: |
           for i in $(seq 1 30); do
@@ -78,9 +98,47 @@ jobs:
           curl -fs localhost:3000/api/dashboards/uid/pulsewatch-overview | grep -q '"title":"Pulsewatch overview"'
           curl -fs -u admin:admin localhost:3000/api/datasources/uid/pulsewatch-prometheus/health \
             | grep -q '"status":"OK"'
-      - name: Logs on failure
+      - name: Inhibition holds back warnings for a target that is down everywhere
+        run: |
+          add() { docker compose exec -T alertmanager amtool --alertmanager.url=http://localhost:9093 alert add "$@"; }
+          add TargetDown severity=page target=ci-inhibited --annotation='summary="ci"'
+          add TargetSlow severity=warn target=ci-inhibited region=eu --annotation='summary="ci"'
+          add TargetSlow severity=warn target=ci-other region=eu --annotation='summary="ci"'
+          seen() { curl -fs localhost:9095/notifications | python3 -c '
+          import json, sys
+          want = tuple(sys.argv[1:])
+          got = {(n["receiver"], a["labels"]["alertname"], a["labels"].get("target"))
+                 for n in json.load(sys.stdin) for a in n["payload"]["alerts"]}
+          sys.exit(0 if want in got else 1)' "$@"; }
+          for i in $(seq 1 30); do
+            seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other && break
+            sleep 3
+          done
+          seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other
+          # warn group_wait is 30s and both warnings arrived together: the inhibited one must be absent.
+          sleep 10
+          if seen warn TargetSlow ci-inhibited; then echo "::error title=inhibition::TargetSlow for ci-inhibited was delivered"; exit 1; fi
+      - name: A real outage pages end to end (probe -> rule -> Alertmanager -> sink)
+        run: |
+          # TargetDown needs 2m of down probes, then page group_wait (10s).
+          for i in $(seq 1 60); do
+            curl -fs 'localhost:9095/notifications?receiver=page' | python3 -c '
+          import json, sys
+          hits = [a for n in json.load(sys.stdin) for a in n["payload"]["alerts"]
+                  if a["labels"].get("alertname") == "TargetDown" and a["labels"].get("target") == "blackhole"]
+          print(hits[:1]); sys.exit(0 if hits else 1)' && exit 0
+            sleep 5
+          done
+          curl -fsG localhost:9090/api/v1/query --data-urlencode 'query=ALERTS'; exit 1
+      - name: Diagnostics on failure
         if: failure()
-        run: docker compose logs
+        run: |
+          annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          docker compose ps 2>&1 | annotate "compose ps"
+          for svc in pulsewatch prometheus alertmanager alert-sink grafana; do
+            docker compose logs --tail=40 "$svc" 2>&1 | annotate "$svc"
+          done
+          curl -fs localhost:9095/notifications 2>&1 | annotate "alert sink inbox"
       - run: docker compose down -v
         if: always()
 
@@ -118,7 +176,7 @@ jobs:
       - run: kubectl apply -k deploy/k8s/overlays/kind
       - name: Wait for rollouts
         run: |
-          for d in pulsewatch prometheus grafana; do
+          for d in pulsewatch prometheus grafana alertmanager alert-sink; do
             kubectl -n pulsewatch rollout status deployment/$d --timeout=240s
           done
       - name: Port-forward
@@ -126,6 +184,7 @@ jobs:
           kubectl -n pulsewatch port-forward svc/pulsewatch 8000:8000 >/dev/null 2>&1 &
           kubectl -n pulsewatch port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 &
           kubectl -n pulsewatch port-forward svc/grafana 3000:3000 >/dev/null 2>&1 &
+          kubectl -n pulsewatch port-forward svc/alert-sink 9095:9095 >/dev/null 2>&1 &
           sleep 5
       - name: API reports the kind region
         run: curl -fs localhost:8000/healthz | grep -q '"region":"kind-local"'
@@ -154,6 +213,25 @@ jobs:
           after=$(curl -fs 'localhost:8000/targets/example/results?limit=1000' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
           echo "results before=$before after=$after"
           test "$after" -ge "$before"
+      - name: Alerts route through Alertmanager to the sink
+        run: |
+          for i in $(seq 1 30); do
+            curl -fs localhost:9090/api/v1/alertmanagers | grep -q 'alertmanager:9093' && break; sleep 2
+          done
+          curl -fs localhost:9090/api/v1/alertmanagers | grep -q 'alertmanager:9093'
+          make alerts-test SEVERITY=page
+          for i in $(seq 1 20); do
+            curl -fs 'localhost:9095/notifications?receiver=page' | grep -q PulsewatchTestAlert && break; sleep 3
+          done
+          make alerts-inbox | grep 'page firing PulsewatchTestAlert alerts-test'
+      - name: Telegram switches on from a local Secret and off again (fake token, nothing sent)
+        run: |
+          make alerts-telegram TELEGRAM_BOT_TOKEN=123456:ci-fake-token TELEGRAM_CHAT_ID=-100123 | tee tg.log
+          grep -q 'Telegram receiver enabled' tg.log
+          # start.sh keeps the token out of Alertmanager's own environment.
+          test "$(kubectl -n pulsewatch exec deploy/alertmanager -- sh -c 'tr "\0" "\n" < /proc/1/environ | grep -c TELEGRAM_BOT_TOKEN || true')" = 0
+          make alerts-telegram-off
+          kubectl -n pulsewatch logs deploy/alertmanager | grep -q 'alert sink only'
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -161,7 +239,7 @@ jobs:
           annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
           kubectl -n pulsewatch get all,pvc,cm 2>&1 | annotate "kubectl get"
           kubectl -n pulsewatch get events --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
-          for d in pulsewatch prometheus grafana; do
+          for d in pulsewatch prometheus grafana alertmanager alert-sink; do
             { kubectl -n pulsewatch get pods -l app.kubernetes.io/name=$d -o wide; \
               kubectl -n pulsewatch logs deploy/$d --tail=60 --all-containers 2>&1; \
               kubectl -n pulsewatch logs deploy/$d --previous --tail=60 2>&1; } | annotate "$d"
@@ -231,8 +309,21 @@ jobs:
       - run: kind load docker-image pulsewatch:dev --name pulsewatch
       - name: Pre-pull Argo CD images on the runner (retries; registry errors show up here, not as ImagePullBackOff)
         run: |
+          # public.ecr.aws/docker/library/* is ECR's mirror of Docker Hub official images and
+          # sometimes answers "toomanyrequests: Data limit exceeded". Fall back to the same
+          # image on Docker Hub and tag it with the name the Argo CD manifests use.
+          pull() {
+            for i in 1 2 3; do docker pull -q "$1" && return 0; sleep 10; done
+            case $1 in
+              public.ecr.aws/docker/library/*)
+                alt=docker.io/library/${1#public.ecr.aws/docker/library/}
+                echo "::warning title=pull::$1 unavailable, using $alt"
+                docker pull -q "$alt" && docker tag "$alt" "$1" && return 0 ;;
+            esac
+            return 1
+          }
           for img in $(kubectl kustomize deploy/argocd/install | sed -n 's/^ *image: //p' | sort -u | grep -v dexidp); do
-            for i in 1 2 3; do docker pull -q "$img" && break; sleep 10; done || { echo "::error title=pull::$img"; exit 1; }
+            pull "$img" || { echo "::error title=pull::$img"; exit 1; }
             kind load docker-image "$img" --name pulsewatch
           done
       - run: make argocd-install
