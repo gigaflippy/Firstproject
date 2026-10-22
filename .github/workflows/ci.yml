@@ -309,8 +309,21 @@ jobs:
       - run: kind load docker-image pulsewatch:dev --name pulsewatch
       - name: Pre-pull Argo CD images on the runner (retries; registry errors show up here, not as ImagePullBackOff)
         run: |
+          # public.ecr.aws/docker/library/* is ECR's mirror of Docker Hub official images and
+          # sometimes answers "toomanyrequests: Data limit exceeded". Fall back to the same
+          # image on Docker Hub and tag it with the name the Argo CD manifests use.
+          pull() {
+            for i in 1 2 3; do docker pull -q "$1" && return 0; sleep 10; done
+            case $1 in
+              public.ecr.aws/docker/library/*)
+                alt=docker.io/library/${1#public.ecr.aws/docker/library/}
+                echo "::warning title=pull::$1 unavailable, using $alt"
+                docker pull -q "$alt" && docker tag "$alt" "$1" && return 0 ;;
+            esac
+            return 1
+          }
           for img in $(kubectl kustomize deploy/argocd/install | sed -n 's/^ *image: //p' | sort -u | grep -v dexidp); do
-            for i in 1 2 3; do docker pull -q "$img" && break; sleep 10; done || { echo "::error title=pull::$img"; exit 1; }
+            pull "$img" || { echo "::error title=pull::$img"; exit 1; }
             kind load docker-image "$img" --name pulsewatch
           done
       - run: make argocd-install
