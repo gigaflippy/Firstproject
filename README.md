@@ -200,6 +200,7 @@ terraform destroy
 
 - **Providers:** `tehcyx/kind` creates the cluster and `kbst/kustomization` applies the same Kustomize overlays that `kubectl apply -k` uses. There's one source of manifests, applied in priority order (namespaces and RBAC, then workloads).
 - **Image:** rebuilt and reloaded only when `src/`, the `Dockerfile` or `pyproject.toml` change (content hash), so a second `terraform apply` changes nothing.
+- **Node image** is pinned (`node_image`, kind v0.31's `kindest/node:v1.35.0`) so the cluster always matches the `kind` CLI that loads the image. Left to the provider default, a provider release moved it to a node `kind load` can't talk to.
 - **State** stays local and is git-ignored, along with the generated `kubeconfig`. No backend or account is needed.
 - **Needs** `terraform`, `docker` and `kind` (for `kind load`).
 - **CI** (`terraform` job): `fmt -check`, `validate`, a real `apply` to a fresh kind cluster, a health check that Prometheus sees both regions, a `plan -detailed-exitcode` that must show no changes, then `destroy`.
