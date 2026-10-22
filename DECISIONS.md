@@ -70,7 +70,7 @@ Open questions from nightly runs. Answer under **Georgi's answer** (one line is 
 
 ## D-003 — Alert routing: Telegram, email, or both (roadmap item 7)? (opened 2026-10-21)
 
-**Status:** resolved: Option 3 + Telegram (2026-10-21)
+**Status:** resolved: Option 3 + Telegram (2026-10-21). Built on `nightly/2026-10-22-alertmanager`: Alertmanager routing + inhibition, local alert sink, Telegram switched on by `make alerts-telegram` / `.env`.
 
 **Context.** Item 7 adds Alertmanager to route the existing alerts (`TargetDown` = page, `TargetDownInSomeRegions` / `TargetSlow` = warn) to a real channel. Every real channel needs a credential that only you can create. It must never be committed: it would live in a git-ignored `.env` for compose and in a Kubernetes Secret you create locally. Both options below are free.
 
