@@ -5,7 +5,7 @@ API_NS  ?= $(NS)   # multi-region: API_NS=pulsewatch-eu (or -us)
 IMAGE   ?= pulsewatch:dev
 OVERLAY ?= deploy/k8s/overlays/kind
 # GitOps: what Argo CD deploys from. HEAD = the repo's default branch.
-GITOPS_REPO     ?= https://github.com/gigaflippy/Firstproject.git
+GITOPS_REPO     ?= https://github.com/gigaflippy/pulsewatch.git
 ARGOCD_REVISION ?= HEAD
 # Platforms recorded in infra/terraform/.terraform.lock.hcl, so `terraform init` verifies
 # provider checksums on Linux, macOS (Intel + Apple silicon) and Windows alike.
@@ -99,7 +99,7 @@ argocd-install:
 
 argocd-bootstrap:
 	kubectl kustomize deploy/argocd/bootstrap | \
-	  sed -e 's|https://github.com/gigaflippy/Firstproject.git|$(GITOPS_REPO)|' \
+	  sed -e 's|https://github.com/gigaflippy/pulsewatch.git|$(GITOPS_REPO)|' \
 	      -e 's|revision: HEAD|revision: $(ARGOCD_REVISION)|' \
 	      -e 's|targetRevision: HEAD|targetRevision: $(ARGOCD_REVISION)|' | \
 	  kubectl apply -f -

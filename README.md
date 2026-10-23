@@ -202,9 +202,10 @@ terraform destroy
 - **Image:** rebuilt and reloaded only when `src/`, the `Dockerfile` or `pyproject.toml` change (content hash), so a second `terraform apply` changes nothing.
 - **Node image** is pinned (`node_image`, kind v0.31's `kindest/node:v1.35.0`) so the cluster always matches the `kind` CLI that loads the image. Left to the provider default, a provider release moved it to a node `kind load` can't talk to.
 - **State** stays local and is git-ignored, along with the generated `kubeconfig`. No backend or account is needed.
+- **Provider lockfile.** `.terraform.lock.hcl` is committed and pins exact provider versions with checksums for Linux, macOS (Intel and Apple silicon) and Windows. Every `terraform init` gets the same providers. Without it, `init` picked up a new `tehcyx/kind` release overnight and broke `kind load` with no change in this repo. `make tf-upgrade` moves to the newest versions the constraints allow; review the diff and commit it. `make tf-lock` only adds missing platform checksums. CI's `terraform-lock` job fails if the committed file is missing a provider or a platform and prints the regenerated file. The `terraform` job runs `init -lockfile=readonly`.
 - **Needs** `terraform`, `docker` and `kind` (for `kind load`).
 - **CI** (`terraform` job): `fmt -check`, `validate`, a real `apply` to a fresh kind cluster, a health check that Prometheus sees both regions, a `plan -detailed-exitcode` that must show no changes, then `destroy`.
-- Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`).
+- Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`). OpenTofu resolves providers from its own registry, so its first `init` adds `registry.opentofu.org` entries to the lockfile. Don't commit those unless you switch for good.
 
 ### GitOps with Argo CD
 
