@@ -7,10 +7,13 @@ OVERLAY ?= deploy/k8s/overlays/kind
 # GitOps: what Argo CD deploys from. HEAD = the repo's default branch.
 GITOPS_REPO     ?= https://github.com/gigaflippy/Firstproject.git
 ARGOCD_REVISION ?= HEAD
+# Platforms recorded in infra/terraform/.terraform.lock.hcl, so `terraform init` verifies
+# provider checksums on Linux, macOS (Intel + Apple silicon) and Windows alike.
+TF_LOCK_PLATFORMS ?= linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64
 
 .PHONY: help kind-up kind-down k8s-apply k8s-wait k8s-validate k8s-forward k8s-status \
 	argocd-up argocd-install argocd-bootstrap argocd-wait argocd-status argocd-ui \
-	alerts-test alerts-inbox alerts-telegram alerts-telegram-off
+	alerts-test alerts-inbox alerts-telegram alerts-telegram-off tf-lock tf-upgrade
 
 help:
 	@echo "make kind-up       create kind cluster, build + load image, deploy, wait for rollout"
@@ -29,6 +32,9 @@ help:
 	@echo "make alerts-inbox  notifications the local alert sink has received"
 	@echo "make alerts-telegram TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...  also route to Telegram"
 	@echo "make alerts-telegram-off  back to the alert sink only"
+	@echo ""
+	@echo "make tf-lock       add any missing provider checksums to infra/terraform/.terraform.lock.hcl"
+	@echo "make tf-upgrade    move the lockfile to the newest provider versions the constraints allow"
 
 kind-up:
 	@kind get clusters | grep -qx '$(CLUSTER)' || kind create cluster --config deploy/k8s/kind-config.yaml --name $(CLUSTER)
@@ -154,3 +160,11 @@ alerts-telegram-off:
 	kubectl -n $(NS) delete secret alertmanager-telegram --ignore-not-found
 	kubectl -n $(NS) rollout restart deployment/alertmanager
 	kubectl -n $(NS) rollout status deployment/alertmanager --timeout=120s
+
+# Provider lockfile. CI runs tf-lock and fails if it changes the committed file.
+tf-lock:
+	cd infra/terraform && terraform providers lock $(addprefix -platform=,$(TF_LOCK_PLATFORMS))
+
+tf-upgrade:
+	cd infra/terraform && terraform init -backend=false -upgrade -input=false >/dev/null
+	$(MAKE) tf-lock
