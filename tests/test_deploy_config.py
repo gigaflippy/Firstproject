@@ -50,9 +50,12 @@ PROMQL_WORDS = {
     "target",
     "region",
     "result",
+    "integration",
 }
 # Series Prometheus itself creates.
 BUILTIN_SERIES = {"ALERTS", "ALERTS_FOR_STATE", "up"}
+# Series scraped from Alertmanager (job "alertmanager"), used by the delivery alert.
+ALERTMANAGER_SERIES = {"alertmanager_notifications_failed_total"}
 
 
 def _exported_metric_names() -> set[str]:
@@ -134,7 +137,7 @@ def test_recording_rules_use_known_metrics():
     recorded = _recording_rule_names()
     for group in data["groups"]:
         for rule in group["rules"]:
-            unknown = _metric_names_in(rule["expr"]) - known - recorded
+            unknown = _metric_names_in(rule["expr"]) - known - recorded - ALERTMANAGER_SERIES
             assert not unknown, f"{rule!r} references unknown series {sorted(unknown)}"
 
 

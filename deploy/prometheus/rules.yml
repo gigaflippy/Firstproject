@@ -37,3 +37,12 @@ groups:
           severity: warn
         annotations:
           summary: "{{ $labels.target }} p95 latency above 2s from {{ $labels.region }}"
+      # Alertmanager could not deliver to a receiver (a wrong Telegram token or chat id,
+      # the alert sink down). Without this, broken routing is silent until a real outage.
+      - alert: AlertmanagerNotificationsFailing
+        expr: sum by (integration) (rate(alertmanager_notifications_failed_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Alertmanager is failing to deliver {{ $labels.integration }} notifications"

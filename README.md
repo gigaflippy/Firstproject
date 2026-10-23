@@ -2,7 +2,7 @@
 
 Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, stores results, serves uptime/latency stats over a REST API, and exposes Prometheus metrics. It is built to run entirely on local infrastructure (Docker, local Kubernetes) at zero cost.
 
-> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps.** Alert routing is next on the [roadmap](#roadmap).
+> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready).** The original [roadmap](#roadmap) is complete.
 
 ## Quick start
 
@@ -15,6 +15,7 @@ docker compose up --build
 - Metrics: http://localhost:8000/metrics
 - Prometheus: http://localhost:9090 (try `pulsewatch_up` or `pulsewatch:latency_p95_seconds`)
 - Grafana: http://localhost:3000 (opens on the Pulsewatch dashboard; anonymous read-only, `admin`/`admin` to edit)
+- Alertmanager: http://localhost:9093, and every notification it sends lands in the alert sink at http://localhost:9095/notifications
 
 Without Docker:
 
@@ -76,8 +77,49 @@ Runtime settings come from environment variables:
 | `TargetDown` | the target is down from **every** region for 2m | page |
 | `TargetDownInSomeRegions` | the target is down from some regions but up from others for 5m (regional or network-path issue) | warn |
 | `TargetSlow` | p95 latency is above 2s for 10m | warn |
+| `AlertmanagerNotificationsFailing` | Alertmanager failed to deliver to a receiver (e.g. a wrong Telegram token) for 10m | warn |
 
 Requiring every region to agree is what keeps a single bad probe location from paging anyone. With one region, `TargetDown` behaves like a plain "down" alert. The rules have unit tests in `rules.test.yml`; run them with `promtool test rules deploy/prometheus/rules.test.yml`. CI runs them too.
+
+## Alert routing
+
+Prometheus sends alerts to **Alertmanager** (`deploy/alertmanager/`, same files for compose and Kubernetes), which routes them by severity:
+
+```
+Prometheus rules ──► Alertmanager ──┬─ severity=page ─► receiver "page" (group_wait 10s, repeat 1h)
+                                    ├─ severity=warn ─► receiver "warn" (group_wait 30s, repeat 12h)
+                                    └─ anything else ─► receiver "default"
+   each receiver ─► alert sink (always, no account needed)
+                 └► Telegram (page + warn, only if you add a bot token locally)
+```
+
+- **Grouping:** by `alertname` and `target`. One notification per broken target, and the regions of one target are batched into it.
+- **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions` and `TargetSlow` for the same target are held back. One page, not three messages about the same outage.
+- **Alert sink:** `pulsewatch-alertsink` is a tiny webhook inbox from the Pulsewatch image (standard library only). It logs one line per alert and serves `GET /notifications?receiver=page`. It makes routing visible, and testable, without any credential.
+- **Delivery is watched:** Prometheus scrapes Alertmanager, and `AlertmanagerNotificationsFailing` warns when a receiver keeps failing. A revoked token doesn't go unnoticed until the next real outage.
+
+### Telegram
+
+Telegram is switched on only by credentials that exist on your machine. Nothing secret is in the repo, and the token only reaches Alertmanager as a 0600 file (`bot_token_file`), never inside a config file or its environment.
+
+1. Message [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
+2. Send your bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id":...}`.
+3. Turn it on:
+
+```bash
+# docker compose: put both values in .env (git-ignored; see .env.example), then
+docker compose up -d alertmanager
+
+# Kubernetes: creates the optional Secret "alertmanager-telegram" from your shell and restarts Alertmanager
+make alerts-telegram TELEGRAM_BOT_TOKEN=123456:ABC... TELEGRAM_CHAT_ID=123456789
+make alerts-test SEVERITY=page    # synthetic alert; arrives in Telegram and the sink within ~10s
+make alerts-inbox                 # what the sink received
+make alerts-telegram-off          # back to the sink only
+```
+
+`start.sh` picks the config at container start: `alertmanager.yml` with no credentials, or `alertmanager-telegram.yml` (the same file plus `telegram_configs`; a test keeps them in sync) with both set. One of the two without the other is an error, not a silent fallback. Alertmanager prints the Telegram API URL, token included, when a send fails, so treat its logs as sensitive once Telegram is on.
+
+**CI** tests all of this without a token: `amtool check-config` on both configs, `amtool config routes test` for every severity, inhibition with synthetic alerts, and a real outage end to end in compose (an always-down target → `TargetDown` → Alertmanager → `page` in the sink). The kind job sends a test alert through the in-cluster Alertmanager and switches Telegram on and off with a fake token.
 
 ## Grafana dashboard
 
@@ -101,7 +143,7 @@ Set `GRAFANA_ADMIN_PASSWORD` before starting if port 3000 is reachable from othe
 
 ## Kubernetes (kind / k3d)
 
-The same stack runs on a local cluster: Pulsewatch, Prometheus and Grafana in the `pulsewatch` namespace. It's built with Kustomize, so you only need `kubectl` and nothing has to be installed in the cluster.
+The same stack runs on a local cluster: Pulsewatch, Prometheus, Alertmanager (with the alert sink) and Grafana in the `pulsewatch` namespace. It's built with Kustomize, so you only need `kubectl` and nothing has to be installed in the cluster.
 
 ```bash
 make kind-up        # create kind cluster, build + load image, apply, wait for rollouts
@@ -114,7 +156,7 @@ Needs `docker`, [`kind`](https://kind.sigs.k8s.io/) and `kubectl`. The image is 
 ```
 deploy/k8s/
   base/                 Pulsewatch Deployment, Service, PVC, targets ConfigMap (targets.yaml)
-  monitoring/           Prometheus + Grafana Deployments/Services
+  monitoring/           Prometheus, Alertmanager, alert sink, Grafana Deployments/Services
   overlays/kind/        single region: everything in one namespace, region=kind-local
   overlays/multi-region/ one namespace per region (eu-sim, us-sim) + shared monitoring namespace
   kind-config.yaml
@@ -123,6 +165,7 @@ deploy/argocd/
   bootstrap/            AppProject + ApplicationSet: one Application per overlays/multi-region/* dir
 deploy/prometheus/      rules.yml shared by compose and k8s; prometheus.yml (compose) / prometheus-k8s.yml (k8s SD)
 deploy/grafana/         shared by compose and k8s
+deploy/alertmanager/    routing config, Telegram variant, start.sh; shared by compose and k8s
 ```
 
 - **One config, two runtimes.** Compose and Kubernetes share the alert rules, Grafana provisioning and the dashboard. The only difference is scraping: compose scrapes `pulsewatch:8000`, while in-cluster Prometheus uses Kubernetes service discovery (`prometheus-k8s.yml`, with a read-only ClusterRole) to find every Pulsewatch pod in any namespace.
@@ -157,10 +200,12 @@ terraform destroy
 
 - **Providers:** `tehcyx/kind` creates the cluster and `kbst/kustomization` applies the same Kustomize overlays that `kubectl apply -k` uses. There's one source of manifests, applied in priority order (namespaces and RBAC, then workloads).
 - **Image:** rebuilt and reloaded only when `src/`, the `Dockerfile` or `pyproject.toml` change (content hash), so a second `terraform apply` changes nothing.
+- **Node image** is pinned (`node_image`, kind v0.31's `kindest/node:v1.35.0`) so the cluster always matches the `kind` CLI that loads the image. Left to the provider default, a provider release moved it to a node `kind load` can't talk to.
 - **State** stays local and is git-ignored, along with the generated `kubeconfig`. No backend or account is needed.
+- **Provider lockfile.** `.terraform.lock.hcl` is committed and pins exact provider versions with checksums for Linux, macOS (Intel and Apple silicon) and Windows. Every `terraform init` gets the same providers. Without it, `init` picked up a new `tehcyx/kind` release overnight and broke `kind load` with no change in this repo. `make tf-upgrade` moves to the newest versions the constraints allow; review the diff and commit it. `make tf-lock` only adds missing platform checksums. CI's `terraform-lock` job fails if the committed file is missing a provider or a platform and prints the regenerated file. The `terraform` job runs `init -lockfile=readonly`.
 - **Needs** `terraform`, `docker` and `kind` (for `kind load`).
 - **CI** (`terraform` job): `fmt -check`, `validate`, a real `apply` to a fresh kind cluster, a health check that Prometheus sees both regions, a `plan -detailed-exitcode` that must show no changes, then `destroy`.
-- Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`).
+- Also runs unchanged on **OpenTofu** (`tofu init && tofu apply`). OpenTofu resolves providers from its own registry, so its first `init` adds `registry.opentofu.org` entries to the lockfile. Don't commit those unless you switch for good.
 
 ### GitOps with Argo CD
 
@@ -215,7 +260,7 @@ ruff check . && ruff format --check .
 pytest
 ```
 
-CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with a smoke test, and a full-stack job that runs `promtool check config`, brings up the compose stack, and checks that Prometheus is scraping Pulsewatch and Grafana serves the provisioned dashboard and a healthy datasource.
+CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with a smoke test, and a full-stack job that runs `promtool check config`, brings up the compose stack, and checks that Prometheus is scraping Pulsewatch and Alertmanager, Grafana serves the provisioned dashboard and a healthy datasource, and an alert travels from a failing probe to the alert sink (see [Alert routing](#alert-routing)).
 
 ## Roadmap
 
@@ -225,4 +270,4 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 4. ~~Multi-region: probe agents in separate namespaces with distinct `region` labels, one Prometheus discovering all of them, consensus alerting~~ ✅
 5. ~~Terraform for the local platform (kind cluster, image, monitoring stack, regions)~~ ✅
 6. ~~ArgoCD GitOps deploys (ApplicationSet over the multi-region overlay, automated sync with self-heal, tested on kind in CI)~~ ✅
-7. Alert routing (Alertmanager to Telegram or email)
+7. ~~Alert routing (Alertmanager with page/warn routing and inhibition, local alert sink, Telegram from a locally created Secret, tested end to end in CI)~~ ✅
