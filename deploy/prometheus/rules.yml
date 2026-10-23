@@ -8,6 +8,40 @@ groups:
           histogram_quantile(0.95,
             sum by (le, target, region) (rate(pulsewatch_probe_latency_seconds_bucket[5m])))
 
+  # Availability SLO per target, with error-budget burn-rate alerts (Google SRE workbook,
+  # ch. 5 "Alerting on SLOs": multiwindow, multi-burn-rate).
+  #
+  # SLI: the fraction of time the target is up from at least one region. This is the same
+  # consensus rule TargetDown uses, so one bad probe location burns no budget and can't page.
+  # SLO window: 7 days (Prometheus keeps 7d). Objective: slo_objective in targets.yaml
+  # (default 0.995), exported by every agent as pulsewatch_slo_objective.
+  - name: pulsewatch.slo
+    rules:
+      - record: pulsewatch:target_up
+        expr: max by (target) (pulsewatch_up)
+      - record: pulsewatch:slo_objective
+        expr: max by (target) (pulsewatch_slo_objective)
+      - record: pulsewatch:slo_error_ratio:5m
+        expr: 1 - avg_over_time(pulsewatch:target_up[5m])
+      - record: pulsewatch:slo_error_ratio:30m
+        expr: 1 - avg_over_time(pulsewatch:target_up[30m])
+      - record: pulsewatch:slo_error_ratio:1h
+        expr: 1 - avg_over_time(pulsewatch:target_up[1h])
+      - record: pulsewatch:slo_error_ratio:6h
+        expr: 1 - avg_over_time(pulsewatch:target_up[6h])
+      - record: pulsewatch:slo_error_ratio:3d
+        expr: 1 - avg_over_time(pulsewatch:target_up[3d])
+      - record: pulsewatch:slo_error_ratio:7d
+        expr: 1 - avg_over_time(pulsewatch:target_up[7d])
+      # Burn rate 1 = spending the budget exactly over the 7d window; 14.4 = in ~12h.
+      - record: pulsewatch:slo_burn_rate:1h
+        expr: pulsewatch:slo_error_ratio:1h / (1 - pulsewatch:slo_objective)
+      - record: pulsewatch:slo_burn_rate:6h
+        expr: pulsewatch:slo_error_ratio:6h / (1 - pulsewatch:slo_objective)
+      # 1 = untouched, 0 = spent, negative = SLO missed over the last 7d.
+      - record: pulsewatch:slo_error_budget_remaining:7d
+        expr: 1 - pulsewatch:slo_error_ratio:7d / (1 - pulsewatch:slo_objective)
+
   - name: pulsewatch.alerts
     rules:
       # A target is only paged as down when every region that probes it agrees.
@@ -46,3 +80,42 @@ groups:
           severity: warn
         annotations:
           summary: "Alertmanager is failing to deliver {{ $labels.integration }} notifications"
+      # Error budget burn. Each alert needs a long window (enough budget actually spent) and a
+      # short one (still burning now, so it resolves soon after recovery).
+      #
+      # Fast burn is for what TargetDown can't see: a target that flaps or fails some probes
+      # and never stays down for 2 minutes. A hard outage already pages as TargetDown, and the
+      # 5m window keeps burning for a few minutes after it ends, so fast burn stays quiet for
+      # 10m after TargetDown last fired. Otherwise every recovery would page a second time.
+      - alert: ErrorBudgetBurnFast
+        expr: |
+          (
+            pulsewatch:slo_error_ratio:1h > 14.4 * (1 - pulsewatch:slo_objective)
+              and pulsewatch:slo_error_ratio:5m > 14.4 * (1 - pulsewatch:slo_objective)
+          )
+          unless on (target)
+            max_over_time(ALERTS{alertname="TargetDown", alertstate="firing"}[10m])
+        # Longer than TargetDown's 2m, so a hard outage always reaches TargetDown first.
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.target }} is burning its 7d error budget 14x too fast (1h)"
+      # Slow burn is a warning, and it may still fire after a long outage has ended: by then
+      # the outage really has used a large part of the week's budget.
+      - alert: ErrorBudgetBurnSlow
+        expr: |
+          (
+            pulsewatch:slo_error_ratio:6h > 6 * (1 - pulsewatch:slo_objective)
+              and pulsewatch:slo_error_ratio:30m > 6 * (1 - pulsewatch:slo_objective)
+          )
+          or
+          (
+            pulsewatch:slo_error_ratio:3d > 1 * (1 - pulsewatch:slo_objective)
+              and pulsewatch:slo_error_ratio:6h > 1 * (1 - pulsewatch:slo_objective)
+          )
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.target }} will run out of its 7d error budget at this rate"

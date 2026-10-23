@@ -74,6 +74,8 @@ jobs:
           routes --verify.receivers=page  alertname=TargetDown severity=page target=api
           routes --verify.receivers=warn  alertname=TargetSlow severity=warn target=api
           routes --verify.receivers=warn  alertname=TargetDownInSomeRegions severity=warn target=api
+          routes --verify.receivers=page  alertname=ErrorBudgetBurnFast severity=page target=api
+          routes --verify.receivers=warn  alertname=ErrorBudgetBurnSlow severity=warn target=api
           routes --verify.receivers=default alertname=Unlabelled
           # The Telegram variant, rendered by start.sh exactly as at runtime (fake values).
           docker run --rm --entrypoint /bin/sh -e TELEGRAM_BOT_TOKEN=123456:ci-fake-token \
@@ -104,6 +106,10 @@ jobs:
           add TargetDown severity=page target=ci-inhibited --annotation='summary="ci"'
           add TargetSlow severity=warn target=ci-inhibited region=eu --annotation='summary="ci"'
           add TargetSlow severity=warn target=ci-other region=eu --annotation='summary="ci"'
+          add ErrorBudgetBurnSlow severity=warn target=ci-inhibited --annotation='summary="ci"'
+          # Fast burn (page) holds back slow burn (warn) for the same target.
+          add ErrorBudgetBurnFast severity=page target=ci-burn --annotation='summary="ci"'
+          add ErrorBudgetBurnSlow severity=warn target=ci-burn --annotation='summary="ci"'
           seen() { curl -fs localhost:9095/notifications | python3 -c '
           import json, sys
           want = tuple(sys.argv[1:])
@@ -111,13 +117,16 @@ jobs:
                  for n in json.load(sys.stdin) for a in n["payload"]["alerts"]}
           sys.exit(0 if want in got else 1)' "$@"; }
           for i in $(seq 1 30); do
-            seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other && break
+            seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other &&
+              seen page ErrorBudgetBurnFast ci-burn && break
             sleep 3
           done
-          seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other
-          # warn group_wait is 30s and both warnings arrived together: the inhibited one must be absent.
+          seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other && seen page ErrorBudgetBurnFast ci-burn
+          # warn group_wait is 30s and all warnings arrived together: the inhibited ones must be absent.
           sleep 10
-          if seen warn TargetSlow ci-inhibited; then echo "::error title=inhibition::TargetSlow for ci-inhibited was delivered"; exit 1; fi
+          for held in "TargetSlow ci-inhibited" "ErrorBudgetBurnSlow ci-inhibited" "ErrorBudgetBurnSlow ci-burn"; do
+            if seen warn $held; then echo "::error title=inhibition::$held was delivered"; exit 1; fi
+          done
       - name: A real outage pages end to end (probe -> rule -> Alertmanager -> sink)
         run: |
           # TargetDown needs 2m of down probes, then page group_wait (10s).
@@ -130,6 +139,22 @@ jobs:
             sleep 5
           done
           curl -fsG localhost:9090/api/v1/query --data-urlencode 'query=ALERTS'; exit 1
+      - name: Error budget is spent by the outage and fast burn stays quiet
+        run: |
+          val() { curl -fsG localhost:9090/api/v1/query --data-urlencode "query=$1" |
+            python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "none")'; }
+          for i in $(seq 1 30); do
+            spent=$(val 'pulsewatch:slo_error_budget_remaining:7d{target="blackhole"}')
+            objective=$(val 'pulsewatch:slo_objective{target="example"}')
+            [ "$spent" != none ] && [ "$objective" != none ] && break
+            sleep 2
+          done
+          echo "budget left: blackhole=$spent; objective example=$objective"
+          python3 -c 'import sys; s, o = map(float, sys.argv[1:]); sys.exit(0 if s < 0 and o == 0.995 else 1)' "$spent" "$objective" ||
+            { echo "::error title=slo::budget left blackhole=$spent (want <0), objective example=$objective (want 0.995)"; exit 1; }
+          # The outage already pages as TargetDown; a second page for the same outage is noise.
+          burn=$(val 'ALERTS{alertname="ErrorBudgetBurnFast", target="blackhole", alertstate="firing"}')
+          if [ "$burn" != none ]; then echo "::error title=slo::ErrorBudgetBurnFast fired during a TargetDown outage"; exit 1; fi
       - name: Diagnostics on failure
         if: failure()
         run: |

@@ -23,10 +23,14 @@ route:
       repeat_interval: 12h
 
 inhibit_rules:
-  # Down from every region already pages. The per-region and latency warnings for the
-  # same target add nothing while that is firing, so they are held back.
+  # Down from every region already pages. The per-region, latency and error-budget
+  # warnings for the same target add nothing while that is firing, so they are held back.
   - source_matchers: ['alertname="TargetDown"']
-    target_matchers: ['alertname=~"TargetDownInSomeRegions|TargetSlow"']
+    target_matchers: ['alertname=~"TargetDownInSomeRegions|TargetSlow|ErrorBudgetBurnSlow"']
+    equal: [target]
+  # Same budget, same target: the fast-burn page makes the slow-burn warning redundant.
+  - source_matchers: ['alertname="ErrorBudgetBurnFast"']
+    target_matchers: ['alertname="ErrorBudgetBurnSlow"']
     equal: [target]
 
 receivers:

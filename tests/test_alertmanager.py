@@ -99,17 +99,23 @@ def test_grouping_labels_exist_on_alerts():
 
 
 def test_inhibition_matches_real_alerts():
-    [rule] = _yaml(BASE_CONFIG)["inhibit_rules"]
+    """Every inhibit rule: a page silences warnings for the same target, and every name it
+    mentions is a real alert (a typo would silently inhibit nothing)."""
     alerts = {r["alert"]: r for r in _alert_rules()}
-    source = _matcher_value(rule["source_matchers"], "alertname")
-    targets = _matcher_value(rule["target_matchers"], "alertname").split("|")
-    assert source == "TargetDown"
-    assert alerts[source]["labels"]["severity"] == "page"
-    assert set(targets) == {"TargetDownInSomeRegions", "TargetSlow"}
-    for t in targets:
-        assert t in alerts, t
-        assert alerts[t]["labels"]["severity"] == "warn"
-    assert rule["equal"] == ["target"]
+    found = {}
+    for rule in _yaml(BASE_CONFIG)["inhibit_rules"]:
+        source = _matcher_value(rule["source_matchers"], "alertname")
+        targets = _matcher_value(rule["target_matchers"], "alertname").split("|")
+        assert alerts[source]["labels"]["severity"] == "page", source
+        for t in targets:
+            assert t in alerts, t
+            assert alerts[t]["labels"]["severity"] == "warn", t
+        assert rule["equal"] == ["target"]
+        found[source] = set(targets)
+    assert found == {
+        "TargetDown": {"TargetDownInSomeRegions", "TargetSlow", "ErrorBudgetBurnSlow"},
+        "ErrorBudgetBurnFast": {"ErrorBudgetBurnSlow"},
+    }
 
 
 def test_receivers_deliver_to_the_alert_sink():

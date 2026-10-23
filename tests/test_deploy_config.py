@@ -137,7 +137,13 @@ def test_recording_rules_use_known_metrics():
     recorded = _recording_rule_names()
     for group in data["groups"]:
         for rule in group["rules"]:
-            unknown = _metric_names_in(rule["expr"]) - known - recorded - ALERTMANAGER_SERIES
+            unknown = (
+                _metric_names_in(rule["expr"])
+                - known
+                - recorded
+                - ALERTMANAGER_SERIES
+                - BUILTIN_SERIES
+            )
             assert not unknown, f"{rule!r} references unknown series {sorted(unknown)}"
 
 

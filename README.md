@@ -2,7 +2,7 @@
 
 Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, stores results, serves uptime/latency stats over a REST API, and exposes Prometheus metrics. It is built to run entirely on local infrastructure (Docker, local Kubernetes) at zero cost.
 
-> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready).** The original [roadmap](#roadmap) is complete.
+> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready), SLOs with error-budget burn-rate alerts.** The original [roadmap](#roadmap) is complete; extras are listed under it.
 
 ## Quick start
 
@@ -38,6 +38,7 @@ targets:
     timeout_seconds: 5
     method: GET                 # GET or HEAD
     expected_status: [200]      # anything else counts as down
+    slo_objective: 0.995        # optional: availability objective over 7d (see SLOs below)
 ```
 
 Runtime settings come from environment variables:
@@ -68,7 +69,8 @@ Runtime settings come from environment variables:
 |---|---|---|
 | `pulsewatch_up` | gauge | `target`, `region` |
 | `pulsewatch_probe_latency_seconds` | histogram | `target`, `region` |
-| `pulsewatch_probes_total` | counter | `target`, `region`, `result` (`up`/`down`) |
+| `pulsewatch_probes_total` | counter | `target`, `region`, `result` (`up`/`down`); both start at 0 |
+| `pulsewatch_slo_objective` | gauge | `target`, `region`: `slo_objective` from the targets file |
 
 `deploy/prometheus/rules.yml` holds recording rules for 1h uptime ratio and p95 latency, plus these alerts:
 
@@ -77,9 +79,22 @@ Runtime settings come from environment variables:
 | `TargetDown` | the target is down from **every** region for 2m | page |
 | `TargetDownInSomeRegions` | the target is down from some regions but up from others for 5m (regional or network-path issue) | warn |
 | `TargetSlow` | p95 latency is above 2s for 10m | warn |
+| `ErrorBudgetBurnFast` | the target burns its 7d error budget at 14.4× on both 1h and 5m windows for 5m (flapping, partial failures) | page |
+| `ErrorBudgetBurnSlow` | 6× on 6h and 30m, or 1× on 3d and 6h, for 15m | warn |
 | `AlertmanagerNotificationsFailing` | Alertmanager failed to deliver to a receiver (e.g. a wrong Telegram token) for 10m | warn |
 
 Requiring every region to agree is what keeps a single bad probe location from paging anyone. With one region, `TargetDown` behaves like a plain "down" alert. The rules have unit tests in `rules.test.yml`; run them with `promtool test rules deploy/prometheus/rules.test.yml`. CI runs them too.
+
+### SLOs and error budgets
+
+Every target has an availability objective (`slo_objective`, default **99.5%**) over a rolling **7-day** window. 7 days is as much history as Prometheus keeps here. At 99.5% the budget is about 50 minutes of downtime a week.
+
+- **SLI: up from at least one region.** The rules use the same consensus as `TargetDown`: `pulsewatch:target_up = max by (target) (pulsewatch_up)`. A broken probe location never spends budget, so it can't page through the SLO alerts either. That case is a `TargetDownInSomeRegions` warning.
+- **Recording rules:** `pulsewatch:slo_error_ratio:{5m,30m,1h,6h,3d,7d}`, `pulsewatch:slo_burn_rate:{1h,6h}` and `pulsewatch:slo_error_budget_remaining:7d` (1 = untouched, 0 = spent, below 0 = SLO missed).
+- **Multiwindow, multi-burn-rate alerts**, as in the Google SRE workbook. Each alert needs a long window, so enough budget has really been spent, and a short window, so the target is still failing now and the alert resolves soon after recovery. Burn rate 1 spends the budget in exactly 7 days; 14.4 spends it in about 12 hours.
+- **What the burn alerts add:** `TargetDown` needs 2 minutes of continuous downtime, so a target that flaps or fails every third probe never trips it, but it still burns budget. `ErrorBudgetBurnFast` pages for that.
+- **One page per outage:** a hard outage already pages as `TargetDown`. Fast burn waits 5m, longer than `TargetDown`'s 2m, and stays quiet for 10m after `TargetDown` last fired, because its 5m window keeps burning for a few minutes after recovery. In Alertmanager, `TargetDown` holds back `ErrorBudgetBurnSlow` for the same target, and so does `ErrorBudgetBurnFast`. Slow burn can still warn after a long outage has ended, because by then that outage really has spent much of the week's budget.
+- **Tested:** `rules.test.yml` covers a flapping target (fast burn pages, `TargetDown` doesn't), a hard outage including the minutes after recovery (only `TargetDown`), one bad region (no budget spent), a steady 5% failure rate (slow burn warns, no page) and per-target objectives. The CI stack job checks that the always-down fixture target ends up with a negative budget and no fast-burn page.
 
 ## Alert routing
 
@@ -94,7 +109,7 @@ Prometheus rules ──► Alertmanager ──┬─ severity=page ─► receiv
 ```
 
 - **Grouping:** by `alertname` and `target`. One notification per broken target, and the regions of one target are batched into it.
-- **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions` and `TargetSlow` for the same target are held back. One page, not three messages about the same outage.
+- **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions`, `TargetSlow` and `ErrorBudgetBurnSlow` for the same target are held back. `ErrorBudgetBurnFast` holds back `ErrorBudgetBurnSlow` too. One page, not several messages about the same outage.
 - **Alert sink:** `pulsewatch-alertsink` is a tiny webhook inbox from the Pulsewatch image (standard library only). It logs one line per alert and serves `GET /notifications?receiver=page`. It makes routing visible, and testable, without any credential.
 - **Delivery is watched:** Prometheus scrapes Alertmanager, and `AlertmanagerNotificationsFailing` warns when a receiver keeps failing. A revoked token doesn't go unnoticed until the next real outage.
 
@@ -133,7 +148,8 @@ make alerts-telegram-off          # back to the sink only
 | Latency p95 / p50 | `pulsewatch:latency_p95_seconds`, `histogram_quantile(0.5, …)` |
 | Uptime last 1h | `pulsewatch:uptime_ratio_1h` |
 | Failed probes per minute | `rate(pulsewatch_probes_total{result="down"}[5m])` |
-| Firing alerts | `ALERTS{alertname=~"Target.*"}` |
+| Firing alerts | `ALERTS{alertname=~"Target.*\|ErrorBudget.*"}` |
+| Error budget left (7d), availability vs objective, burn rate 1h/6h | `pulsewatch:slo_*` recording rules (all regions combined, so the `Region` filter doesn't apply) |
 
 `Region` and `Target` dropdowns filter every panel, so the same dashboard works once several regions report into one Prometheus.
 
@@ -271,3 +287,9 @@ CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with
 5. ~~Terraform for the local platform (kind cluster, image, monitoring stack, regions)~~ ✅
 6. ~~ArgoCD GitOps deploys (ApplicationSet over the multi-region overlay, automated sync with self-heal, tested on kind in CI)~~ ✅
 7. ~~Alert routing (Alertmanager with page/warn routing and inhibition, local alert sink, Telegram from a locally created Secret, tested end to end in CI)~~ ✅
+
+Beyond the original roadmap:
+
+- ~~Committed Terraform provider lockfile, enforced in CI~~ ✅
+- ~~Per-target availability SLOs: error-budget recording rules, multiwindow burn-rate alerts, dashboard row~~ ✅
+- Next candidates: k6 load test of the API, a chaos test (kill one region and check that only `TargetDownInSomeRegions` fires), an architecture diagram.
