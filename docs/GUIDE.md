@@ -203,6 +203,18 @@ When you change something, this table tells you where:
 
 ## 6. Four ways to run it
 
+**Before you start**, install what the way you pick needs. Versions that CI uses are the safe choice:
+
+| Tool | Version | Needed for |
+|---|---|---|
+| Docker (with Compose) | any recent | everything |
+| [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) | **v0.31.x** (matches the pinned node image `kindest/node:v1.35.0`) | Kubernetes, Terraform, Argo CD |
+| [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.30 or newer | Kubernetes, Argo CD |
+| [Terraform](https://developer.hashicorp.com/terraform/install) | 1.6 or newer (CI uses 1.9.8) | Terraform |
+| Python | 3.11 or newer | running tests or the service without Docker |
+
+Optional, for `make k8s-validate`: `kubeconform`, `promtool` (comes with Prometheus) and `amtool` (comes with Alertmanager).
+
 | Way | Command | Use it when | Needs |
 |---|---|---|---|
 | **Docker Compose** | `docker compose up --build` | You want to see it working in two minutes | Docker |
@@ -234,6 +246,19 @@ make kind-down
 ```
 
 Take a screenshot of Grafana while the partition is active. It is the best picture of the project you can put in the README (see the [checklist](#10-your-checklist)).
+
+**When something goes wrong:**
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `docker compose up` fails with "port is already allocated" | Something else uses 8000, 9090, 9093, 9095 or 3000 | Stop the other program, or change the left port number in `docker-compose.yml` |
+| Pods stay in `ErrImagePull` / `ImagePullBackOff` | The `pulsewatch:dev` image is not inside the kind cluster | Run `make kind-up` again (it builds and loads the image), or `kind load docker-image pulsewatch:dev --name pulsewatch` |
+| `kind load` fails with a containerd error | Your `kind` CLI does not match the node image | Use kind v0.31.x (table above) |
+| `make k8s-forward` says "unable to forward" | The pod is not ready yet, or the service is in another namespace | `make k8s-status`. For two regions, add `API_NS=pulsewatch-eu` |
+| Grafana panels say "No data" | Prometheus has not scraped yet, or the time range is too short | Wait one minute. Check http://localhost:9090/targets: every target must be `UP` |
+| Argo CD apps stay `OutOfSync` or `Missing` | Argo CD polls GitHub every 60 seconds, or the branch does not exist | Wait one minute, then `make argocd-status`. `ARGOCD_REVISION` must be a pushed branch or commit |
+| No Telegram message | Token or chat id is wrong, or you did not message the bot first | `make alerts-inbox` shows what Alertmanager sent. Alertmanager logs show the Telegram error (they contain the token, so do not paste them anywhere) |
+| A test fails after you edit a config | The tests check that files agree with each other | Read the assertion message. It names the two things that differ |
 
 ---
 
