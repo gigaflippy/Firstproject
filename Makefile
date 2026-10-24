@@ -10,10 +10,15 @@ ARGOCD_REVISION ?= HEAD
 # Platforms recorded in infra/terraform/.terraform.lock.hcl, so `terraform init` verifies
 # provider checksums on Linux, macOS (Intel + Apple silicon) and Windows alike.
 TF_LOCK_PLATFORMS ?= linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64
+# Chaos experiments (multi-region overlay): which region to break, and which target host
+# that region loses its network path to.
+CHAOS_NS   ?= pulsewatch-us
+CHAOS_HOST ?= example.com
 
 .PHONY: help kind-up kind-down k8s-apply k8s-wait k8s-validate k8s-forward k8s-status \
 	argocd-up argocd-install argocd-bootstrap argocd-wait argocd-status argocd-ui \
-	alerts-test alerts-inbox alerts-telegram alerts-telegram-off tf-lock tf-upgrade
+	alerts-test alerts-inbox alerts-telegram alerts-telegram-off tf-lock tf-upgrade \
+	chaos-partition chaos-kill-region chaos-heal chaos-alerts
 
 help:
 	@echo "make kind-up       create kind cluster, build + load image, deploy, wait for rollout"
@@ -32,6 +37,10 @@ help:
 	@echo "make alerts-inbox  notifications the local alert sink has received"
 	@echo "make alerts-telegram TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...  also route to Telegram"
 	@echo "make alerts-telegram-off  back to the alert sink only"
+	@echo ""
+	@echo "make chaos-partition   cut region $(CHAOS_NS) off from $(CHAOS_HOST) (expect TargetDownInSomeRegions)"
+	@echo "make chaos-kill-region scale the $(CHAOS_NS) agent to zero (expect ProbeRegionMissing)"
+	@echo "make chaos-heal        undo both; make chaos-alerts lists what Prometheus has firing"
 	@echo ""
 	@echo "make tf-lock       add any missing provider checksums to infra/terraform/.terraform.lock.hcl"
 	@echo "make tf-upgrade    move the lockfile to the newest provider versions the constraints allow"
@@ -168,3 +177,33 @@ tf-lock:
 tf-upgrade:
 	cd infra/terraform && terraform init -backend=false -upgrade -input=false >/dev/null
 	$(MAKE) tf-lock
+
+# Chaos experiments. Run against a kubectl/Terraform deploy of the multi-region overlay:
+# under Argo CD, self-heal reverts these patches within a minute (which is its own demo).
+#
+# Partition: the region's agent resolves CHAOS_HOST to 127.0.0.1 (a hostAliases entry in
+# /etc/hosts), so its probes of that target fail with "connection refused" while every
+# other region still reaches it. Works on any CNI, no NetworkPolicy support needed.
+chaos-partition:
+	kubectl -n $(CHAOS_NS) patch deployment/pulsewatch --type=strategic -p \
+	  '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"127.0.0.1","hostnames":["$(CHAOS_HOST)"]}]}}}}'
+	kubectl -n $(CHAOS_NS) rollout status deployment/pulsewatch --timeout=180s
+	@echo "$(CHAOS_NS) can no longer reach $(CHAOS_HOST). Expect TargetDownInSomeRegions (warn) after 5m, no TargetDown."
+
+chaos-kill-region:
+	kubectl -n $(CHAOS_NS) scale deployment/pulsewatch --replicas=0
+	@for i in $$(seq 1 60); do \
+	  test -z "$$(kubectl -n $(CHAOS_NS) get pods -l app.kubernetes.io/name=pulsewatch -o name)" && exit 0; sleep 2; \
+	done; echo "pods in $(CHAOS_NS) did not terminate"; exit 1
+	@echo "$(CHAOS_NS) agent is gone. Expect ProbeRegionMissing (warn) after 5m; ProbeAgentsAbsent (page) if it was the last one."
+
+chaos-heal:
+	-kubectl -n $(CHAOS_NS) patch deployment/pulsewatch --type=json \
+	  -p '[{"op":"remove","path":"/spec/template/spec/hostAliases"}]' 2>/dev/null
+	kubectl -n $(CHAOS_NS) scale deployment/pulsewatch --replicas=1
+	kubectl -n $(CHAOS_NS) rollout status deployment/pulsewatch --timeout=180s
+
+# Firing and pending alerts, straight from Prometheus (no port-forward needed).
+chaos-alerts:
+	@kubectl -n $(NS) exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/alerts' | \
+	  python3 -c 'import json,sys; [print(a["state"], a["labels"].get("alertname"), a["labels"].get("target", "-"), a["labels"].get("region", "-")) for a in json.load(sys.stdin)["data"]["alerts"]]'

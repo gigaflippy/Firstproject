@@ -27,6 +27,7 @@ COMPOSE = ROOT / "docker-compose.yml"
 PROMQL_WORDS = {
     "sum",
     "count",
+    "group",
     "avg",
     "min",
     "max",
@@ -45,6 +46,7 @@ PROMQL_WORDS = {
     "avg_over_time",
     "max_over_time",
     "min_over_time",
+    "absent",
     "label_values",
     "le",
     "target",

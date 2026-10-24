@@ -32,6 +32,10 @@ inhibit_rules:
   - source_matchers: ['alertname="ErrorBudgetBurnFast"']
     target_matchers: ['alertname="ErrorBudgetBurnSlow"']
     equal: [target]
+  # No agent reports at all: the per-region "stopped reporting" warnings are the same
+  # incident. No `equal`, because ProbeAgentsAbsent has no region or target label.
+  - source_matchers: ['alertname="ProbeAgentsAbsent"']
+    target_matchers: ['alertname="ProbeRegionMissing"']
 
 receivers:
   - name: default

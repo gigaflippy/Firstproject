@@ -210,3 +210,93 @@ tests:
       - eval_time: 10m
         alertname: ErrorBudgetBurnFast
         exp_alerts: []
+
+  # Meta-monitoring: lost probe agents (chaos-tested on kind in CI, the `chaos` job).
+  - name: one region stops reporting, the other keeps the consensus
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '1x300'
+      # us agent dies after 5m (scaled to zero / unscrapable: its series go stale)
+      - series: 'pulsewatch_up{target="api", region="us"}'
+        values: '1x20 stale'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ProbeRegionMissing
+        exp_alerts: []   # not yet: needs 5m
+      - eval_time: 11m
+        alertname: ProbeRegionMissing
+        exp_alerts:
+          - exp_labels: { severity: warn, region: us }
+            exp_annotations:
+              summary: "Probe region us stopped reporting; alerts rely on the remaining regions"
+      - eval_time: 11m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: TargetDownInSomeRegions
+        exp_alerts: []   # a missing region is not a down region
+      - eval_time: 11m
+        alertname: ProbeAgentsAbsent
+        exp_alerts: []
+      # gone for over an hour: treated as decommissioned
+      - eval_time: 70m
+        alertname: ProbeRegionMissing
+        exp_alerts: []
+
+  - name: every agent gone pages, because TargetDown can no longer fire
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '1x20 stale'
+      - series: 'pulsewatch_up{target="api", region="us"}'
+        values: '1x20 stale'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ProbeAgentsAbsent
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ProbeAgentsAbsent
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations: { summary: "No Pulsewatch probe agent is reporting; uptime alerting is blind" }
+      # also firing, but Alertmanager inhibits these behind ProbeAgentsAbsent
+      - eval_time: 11m
+        alertname: ProbeRegionMissing
+        exp_alerts:
+          - exp_labels: { severity: warn, region: eu }
+            exp_annotations:
+              summary: "Probe region eu stopped reporting; alerts rely on the remaining regions"
+          - exp_labels: { severity: warn, region: us }
+            exp_annotations:
+              summary: "Probe region us stopped reporting; alerts rely on the remaining regions"
+      - eval_time: 11m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: agents that never came up page too
+    interval: 15s
+    input_series:
+      - series: 'up{job="pulsewatch"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ProbeAgentsAbsent
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations: { summary: "No Pulsewatch probe agent is reporting; uptime alerting is blind" }
+
+  - name: a pod restart (2m without series) does not warn
+    interval: 15s
+    input_series:
+      - series: 'pulsewatch_up{target="api", region="eu"}'
+        values: '1x80'
+      - series: 'pulsewatch_up{target="api", region="us"}'
+        values: '1x20 stale _x7 1x50'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: ProbeRegionMissing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ProbeRegionMissing
+        exp_alerts: []

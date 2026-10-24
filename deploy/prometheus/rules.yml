@@ -71,6 +71,31 @@ groups:
           severity: warn
         annotations:
           summary: "{{ $labels.target }} p95 latency above 2s from {{ $labels.region }}"
+      # Meta-monitoring: who watches the probes. TargetDown is a consensus of the regions
+      # that report, so a dead agent doesn't page by itself: it silently shrinks the
+      # consensus, and if every agent dies there is no pulsewatch_up left and nothing
+      # can fire at all. These two alerts close that gap.
+      #
+      # A region that reported in the last hour and has no series now: the agent is gone,
+      # crashlooping or unscrapable (a failed scrape marks its series stale). A region
+      # that has been gone for an hour counts as decommissioned and the alert resolves.
+      - alert: ProbeRegionMissing
+        expr: |
+          group by (region) (max_over_time(pulsewatch_up[1h]))
+            unless group by (region) (pulsewatch_up)
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Probe region {{ $labels.region }} stopped reporting; alerts rely on the remaining regions"
+      # No agent reports anything: Pulsewatch is blind and TargetDown can never fire.
+      - alert: ProbeAgentsAbsent
+        expr: absent(pulsewatch_up)
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "No Pulsewatch probe agent is reporting; uptime alerting is blind"
       # Alertmanager could not deliver to a receiver (a wrong Telegram token or chat id,
       # the alert sink down). Without this, broken routing is silent until a real outage.
       - alert: AlertmanagerNotificationsFailing

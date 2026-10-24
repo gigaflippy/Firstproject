@@ -2,7 +2,7 @@
 
 Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, stores results, serves uptime/latency stats over a REST API, and exposes Prometheus metrics. It is built to run entirely on local infrastructure (Docker, local Kubernetes) at zero cost.
 
-> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready), SLOs with error-budget burn-rate alerts.** The original [roadmap](#roadmap) is complete; extras are listed under it.
+> Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready), SLOs with error-budget burn-rate alerts, chaos experiments with meta-monitoring.** The original [roadmap](#roadmap) is complete; extras are listed under it.
 
 ## Quick start
 
@@ -82,8 +82,12 @@ Runtime settings come from environment variables:
 | `ErrorBudgetBurnFast` | the target burns its 7d error budget at 14.4× on both 1h and 5m windows for 5m (flapping, partial failures) | page |
 | `ErrorBudgetBurnSlow` | 6× on 6h and 30m, or 1× on 3d and 6h, for 15m | warn |
 | `AlertmanagerNotificationsFailing` | Alertmanager failed to deliver to a receiver (e.g. a wrong Telegram token) for 10m | warn |
+| `ProbeRegionMissing` | a region that reported in the last hour has no series for 5m (agent gone, crashlooping or unscrapable) | warn |
+| `ProbeAgentsAbsent` | no agent reports `pulsewatch_up` at all for 5m: uptime alerting is blind | page |
 
-Requiring every region to agree is what keeps a single bad probe location from paging anyone. With one region, `TargetDown` behaves like a plain "down" alert. The rules have unit tests in `rules.test.yml`; run them with `promtool test rules deploy/prometheus/rules.test.yml`. CI runs them too.
+Requiring every region to agree is what keeps a single bad probe location from paging anyone. With one region, `TargetDown` behaves like a plain "down" alert.
+
+The consensus has a blind spot that the two `Probe*` alerts close: it only counts the regions that report. A dead agent doesn't page by itself, it quietly shrinks the consensus, and if every agent dies there is no `pulsewatch_up` left, so `TargetDown` can never fire. `ProbeRegionMissing` warns when a region drops out (after an hour it counts as decommissioned and resolves), and `ProbeAgentsAbsent` pages when none is left. The rules have unit tests in `rules.test.yml`; run them with `promtool test rules deploy/prometheus/rules.test.yml`. CI runs them too.
 
 ### SLOs and error budgets
 
@@ -109,7 +113,7 @@ Prometheus rules ──► Alertmanager ──┬─ severity=page ─► receiv
 ```
 
 - **Grouping:** by `alertname` and `target`. One notification per broken target, and the regions of one target are batched into it.
-- **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions`, `TargetSlow` and `ErrorBudgetBurnSlow` for the same target are held back. `ErrorBudgetBurnFast` holds back `ErrorBudgetBurnSlow` too. One page, not several messages about the same outage.
+- **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions`, `TargetSlow` and `ErrorBudgetBurnSlow` for the same target are held back. `ErrorBudgetBurnFast` holds back `ErrorBudgetBurnSlow` too, and `ProbeAgentsAbsent` holds back every `ProbeRegionMissing`. One page, not several messages about the same outage.
 - **Alert sink:** `pulsewatch-alertsink` is a tiny webhook inbox from the Pulsewatch image (standard library only). It logs one line per alert and serves `GET /notifications?receiver=page`. It makes routing visible, and testable, without any credential.
 - **Delivery is watched:** Prometheus scrapes Alertmanager, and `AlertmanagerNotificationsFailing` warns when a receiver keeps failing. A revoked token doesn't go unnoticed until the next real outage.
 
@@ -148,7 +152,7 @@ make alerts-telegram-off          # back to the sink only
 | Latency p95 / p50 | `pulsewatch:latency_p95_seconds`, `histogram_quantile(0.5, …)` |
 | Uptime last 1h | `pulsewatch:uptime_ratio_1h` |
 | Failed probes per minute | `rate(pulsewatch_probes_total{result="down"}[5m])` |
-| Firing alerts | `ALERTS{alertname=~"Target.*\|ErrorBudget.*"}` |
+| Firing alerts | `ALERTS{alertname=~"Target.*\|ErrorBudget.*\|Probe.*"}` |
 | Error budget left (7d), availability vs objective, burn rate 1h/6h | `pulsewatch:slo_*` recording rules (all regions combined, so the `Region` filter doesn't apply) |
 
 `Region` and `Target` dropdowns filter every panel, so the same dashboard works once several regions report into one Prometheus.
@@ -200,6 +204,22 @@ make k8s-forward API_NS=pulsewatch-eu
 Each region is a Pulsewatch agent in its own namespace (`pulsewatch-eu`, `pulsewatch-us`) with its own `PULSEWATCH_REGION`, probing the same targets. One Prometheus in `pulsewatch` discovers all agents through the Kubernetes API. Adding a region is a copy of `region-us/` with a new name, and Prometheus needs no changes. The Grafana `Region` dropdown and the alerts above use the `region` label.
 
 These "regions" all share one machine, so they show the multi-region design (discovery, labelling, consensus alerting) rather than real geographic diversity. Real regions are the same manifests applied to clusters in different places, with Prometheus federation or remote-write on top.
+
+### Chaos experiments
+
+Three failure modes, each with a make target and an expected alert. They run against the multi-region overlay deployed with `make kind-up` or Terraform. Under Argo CD, self-heal reverts them within a minute.
+
+| Experiment | What it does | Expected |
+|---|---|---|
+| `make chaos-partition` | `pulsewatch-us` resolves `example.com` to `127.0.0.1` (a `hostAliases` entry), so only that region loses its path to the target | `TargetDownInSomeRegions` (warn) after 5m. No `TargetDown`, no page, no error budget spent |
+| `make chaos-kill-region` | scales the `pulsewatch-us` agent to zero | `ProbeRegionMissing` (warn); `eu` alone keeps alerting |
+| `make chaos-kill-region CHAOS_NS=pulsewatch-eu` (after the above) | the last agent goes too | `ProbeAgentsAbsent` (page); the region warnings are inhibited behind it |
+
+`make chaos-heal` (with the same `CHAOS_NS`) undoes the partition and scales the agent back up. `make chaos-alerts` lists what Prometheus has pending and firing, and `make alerts-inbox` shows what was delivered. Change the region with `CHAOS_NS`, the host with `CHAOS_HOST`.
+
+The partition uses `/etc/hosts` instead of a NetworkPolicy, so it works the same on any CNI (kind's default included) and touches nothing outside one Deployment.
+
+**CI** (`chaos` job) runs all three on a fresh kind cluster and checks each one end to end with `scripts/chaos_check.py`. For every experiment it checks that the expected alert fires in Prometheus, reaches the right Alertmanager receiver in the alert sink, and that the alerts which must stay quiet do: no `TargetDown` and no budget burn during the partition, and the region warnings show as inhibited in Alertmanager's API while `ProbeAgentsAbsent` pages. Then it heals everything and waits for the meta alerts to clear.
 
 ### Terraform
 
@@ -292,4 +312,5 @@ Beyond the original roadmap:
 
 - ~~Committed Terraform provider lockfile, enforced in CI~~ ✅
 - ~~Per-target availability SLOs: error-budget recording rules, multiwindow burn-rate alerts, dashboard row~~ ✅
-- Next candidates: k6 load test of the API, a chaos test (kill one region and check that only `TargetDownInSomeRegions` fires), an architecture diagram.
+- ~~Chaos experiments (regional partition, lost region, all agents lost), CI-tested on kind, plus meta-monitoring alerts for lost probe agents~~ ✅
+- Next candidates: k6 load test of the API, an architecture diagram, a Helm chart.

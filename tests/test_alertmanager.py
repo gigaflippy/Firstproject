@@ -99,8 +99,9 @@ def test_grouping_labels_exist_on_alerts():
 
 
 def test_inhibition_matches_real_alerts():
-    """Every inhibit rule: a page silences warnings for the same target, and every name it
-    mentions is a real alert (a typo would silently inhibit nothing)."""
+    """Every inhibit rule: a page silences warnings for the same target (or, for the
+    target-less meta alerts, globally), and every name it mentions is a real alert
+    (a typo would silently inhibit nothing)."""
     alerts = {r["alert"]: r for r in _alert_rules()}
     found = {}
     for rule in _yaml(BASE_CONFIG)["inhibit_rules"]:
@@ -110,11 +111,16 @@ def test_inhibition_matches_real_alerts():
         for t in targets:
             assert t in alerts, t
             assert alerts[t]["labels"]["severity"] == "warn", t
-        assert rule["equal"] == ["target"]
+        if source.startswith("Probe"):
+            # Meta alerts carry no target label; `equal: [target]` would never match.
+            assert "equal" not in rule, source
+        else:
+            assert rule["equal"] == ["target"]
         found[source] = set(targets)
     assert found == {
         "TargetDown": {"TargetDownInSomeRegions", "TargetSlow", "ErrorBudgetBurnSlow"},
         "ErrorBudgetBurnFast": {"ErrorBudgetBurnSlow"},
+        "ProbeAgentsAbsent": {"ProbeRegionMissing"},
     }
 
 

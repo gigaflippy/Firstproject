@@ -614,7 +614,7 @@
             "uid": "pulsewatch-prometheus"
           },
           "refId": "A",
-          "expr": "ALERTS{alertstate=\"firing\", alertname=~\"Target.*|ErrorBudget.*\", region=~\"$region\", target=~\"$target\"}",
+          "expr": "ALERTS{alertstate=\"firing\", alertname=~\"Target.*|ErrorBudget.*|Probe.*\", region=~\"$region\", target=~\"$target\"}",
           "range": false,
           "instant": true,
           "format": "table"

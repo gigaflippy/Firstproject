@@ -76,6 +76,8 @@ jobs:
           routes --verify.receivers=warn  alertname=TargetDownInSomeRegions severity=warn target=api
           routes --verify.receivers=page  alertname=ErrorBudgetBurnFast severity=page target=api
           routes --verify.receivers=warn  alertname=ErrorBudgetBurnSlow severity=warn target=api
+          routes --verify.receivers=warn  alertname=ProbeRegionMissing severity=warn region=us-sim
+          routes --verify.receivers=page  alertname=ProbeAgentsAbsent severity=page
           routes --verify.receivers=default alertname=Unlabelled
           # The Telegram variant, rendered by start.sh exactly as at runtime (fake values).
           docker run --rm --entrypoint /bin/sh -e TELEGRAM_BOT_TOKEN=123456:ci-fake-token \
@@ -110,21 +112,25 @@ jobs:
           # Fast burn (page) holds back slow burn (warn) for the same target.
           add ErrorBudgetBurnFast severity=page target=ci-burn --annotation='summary="ci"'
           add ErrorBudgetBurnSlow severity=warn target=ci-burn --annotation='summary="ci"'
+          # No agents at all holds back the per-region "stopped reporting" warnings.
+          add ProbeAgentsAbsent severity=page --annotation='summary="ci"'
+          add ProbeRegionMissing severity=warn region=ci-region --annotation='summary="ci"'
           seen() { curl -fs localhost:9095/notifications | python3 -c '
           import json, sys
           want = tuple(sys.argv[1:])
-          got = {(n["receiver"], a["labels"]["alertname"], a["labels"].get("target"))
+          got = {(n["receiver"], a["labels"]["alertname"], a["labels"].get("target", "-"))
                  for n in json.load(sys.stdin) for a in n["payload"]["alerts"]}
           sys.exit(0 if want in got else 1)' "$@"; }
           for i in $(seq 1 30); do
             seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other &&
-              seen page ErrorBudgetBurnFast ci-burn && break
+              seen page ErrorBudgetBurnFast ci-burn && seen page ProbeAgentsAbsent - && break
             sleep 3
           done
           seen page TargetDown ci-inhibited && seen warn TargetSlow ci-other && seen page ErrorBudgetBurnFast ci-burn
+          seen page ProbeAgentsAbsent -
           # warn group_wait is 30s and all warnings arrived together: the inhibited ones must be absent.
           sleep 10
-          for held in "TargetSlow ci-inhibited" "ErrorBudgetBurnSlow ci-inhibited" "ErrorBudgetBurnSlow ci-burn"; do
+          for held in "TargetSlow ci-inhibited" "ErrorBudgetBurnSlow ci-inhibited" "ErrorBudgetBurnSlow ci-burn" "ProbeRegionMissing -"; do
             if seen warn $held; then echo "::error title=inhibition::$held was delivered"; exit 1; fi
           done
       - name: A real outage pages end to end (probe -> rule -> Alertmanager -> sink)
@@ -314,6 +320,88 @@ jobs:
           kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
           kubectl -n pulsewatch logs deploy/prometheus --tail=60 2>&1 | annotate "prometheus"
           kubectl -n pulsewatch-eu logs deploy/pulsewatch --tail=40 2>&1 | annotate "pulsewatch-eu"
+
+  chaos:
+    # Chaos experiments on the multi-region stack, checked end to end (Prometheus rule ->
+    # Alertmanager route -> alert sink): a regional network partition must only warn, and
+    # losing probe agents must be noticed instead of silently shrinking the consensus.
+    runs-on: ubuntu-latest
+    needs: [test, k8s-manifests]
+    timeout-minutes: 40
+    env:
+      CHECK: python3 scripts/chaos_check.py --timeout 540
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: pulsewatch
+          config: deploy/k8s/kind-config.yaml
+      - run: docker build -t pulsewatch:dev .
+      - run: kind load docker-image pulsewatch:dev --name pulsewatch
+      - run: kubectl apply -k deploy/k8s/overlays/multi-region
+      - name: Wait for rollouts
+        run: make k8s-wait
+      - name: Port-forward Prometheus, Alertmanager and the alert sink
+        run: |
+          kubectl -n pulsewatch port-forward svc/prometheus 9090:9090 >/dev/null 2>&1 &
+          kubectl -n pulsewatch port-forward svc/alertmanager 9093:9093 >/dev/null 2>&1 &
+          kubectl -n pulsewatch port-forward svc/alert-sink 9095:9095 >/dev/null 2>&1 &
+          sleep 5
+      - name: Steady state - both regions see the target up
+        run: $CHECK wait-value 'count(pulsewatch_up{target="example"} == 1)' 2
+      - name: "Partition: us-sim loses its path to example.com"
+        run: make chaos-partition CHAOS_NS=pulsewatch-us CHAOS_HOST=example.com
+      - name: "Partition: only TargetDownInSomeRegions fires, routed to warn"
+        run: |
+          $CHECK wait-value 'pulsewatch_up{target="example", region="us-sim"}' 0
+          $CHECK wait-alert TargetDownInSomeRegions target=example region=us-sim
+          $CHECK wait-delivered warn TargetDownInSomeRegions target=example region=us-sim
+          # The other region still sees it up, so nothing pages and no error budget burns.
+          $CHECK never-fired TargetDown target=example --window 15m
+          $CHECK not-delivered page TargetDown target=example
+          $CHECK wait-value 'min_over_time(pulsewatch:target_up{target="example"}[10m])' 1
+      - name: "Kill region: the us-sim agent goes away"
+        run: |
+          make chaos-heal CHAOS_NS=pulsewatch-us
+          make chaos-kill-region CHAOS_NS=pulsewatch-us
+      - name: "Kill region: ProbeRegionMissing warns; eu-sim alone keeps alerting"
+        run: |
+          $CHECK wait-value 'count(count by (region) (pulsewatch_up))' 1
+          $CHECK wait-alert ProbeRegionMissing region=us-sim
+          $CHECK wait-delivered warn ProbeRegionMissing region=us-sim
+          # A missing region is not a down region.
+          $CHECK not-firing TargetDownInSomeRegions region=us-sim
+          $CHECK not-firing ProbeAgentsAbsent
+      - name: "Kill every region: ProbeAgentsAbsent pages and holds back the region warnings"
+        run: |
+          make chaos-kill-region CHAOS_NS=pulsewatch-eu
+          $CHECK wait-alert ProbeAgentsAbsent
+          $CHECK wait-delivered page ProbeAgentsAbsent
+          $CHECK wait-alert ProbeRegionMissing region=eu-sim
+          # Alertmanager has both region warnings and holds them back behind the page.
+          $CHECK --timeout 120 wait-inhibited ProbeRegionMissing region=eu-sim
+          $CHECK --timeout 120 wait-inhibited ProbeRegionMissing region=us-sim
+          $CHECK not-delivered warn ProbeRegionMissing region=eu-sim
+      - name: "Heal: both regions report again and the meta alerts clear"
+        run: |
+          make chaos-heal CHAOS_NS=pulsewatch-eu
+          make chaos-heal CHAOS_NS=pulsewatch-us
+          $CHECK wait-value 'count(count by (region) (pulsewatch_up))' 2
+          $CHECK wait-value 'count(pulsewatch_up{target="example"} == 1)' 2
+          $CHECK --timeout 120 wait-value 'count(ALERTS{alertname=~"Probe.*", alertstate="firing"}) or vector(0)' 0
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          annotate() { python3 -c 'import sys; t=sys.stdin.read()[-12000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          kubectl get pods,svc -A -l app.kubernetes.io/part-of=pulsewatch -o wide 2>&1 | annotate "pods"
+          kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -40 | annotate "events"
+          make chaos-alerts 2>&1 | annotate "prometheus alerts"
+          curl -fsG localhost:9090/api/v1/query --data-urlencode 'query=pulsewatch_up' 2>&1 | annotate "pulsewatch_up"
+          make alerts-inbox 2>&1 | annotate "alert sink inbox"
+          for ns in pulsewatch-eu pulsewatch-us; do
+            kubectl -n $ns logs deploy/pulsewatch --tail=40 2>&1 | annotate "agent $ns"
+          done
+          kubectl -n pulsewatch logs deploy/alertmanager --tail=40 2>&1 | annotate "alertmanager"
 
   argocd:
     # GitOps end to end: Argo CD on kind deploys the multi-region stack from this
