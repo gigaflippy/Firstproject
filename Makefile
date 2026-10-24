@@ -154,8 +154,10 @@ alerts-test:
 alerts-inbox:
 	@kubectl -n $(NS) exec deploy/alert-sink -- python -c "$$ALERTS_INBOX_PY"
 
-# Values come from the environment (or make arguments) and are piped to kubectl on stdin,
-# so they never appear in a process list or in this repo.
+# Values come from the environment (or make arguments) and reach kubectl on stdin, so
+# kubectl's own command line never holds them and nothing is written to this repo.
+# Make arguments do show in your shell history and in `ps` while make runs. Export the
+# variables first (read -rs TELEGRAM_BOT_TOKEN; export TELEGRAM_BOT_TOKEN) to avoid that.
 alerts-telegram:
 	@test -n "$$TELEGRAM_BOT_TOKEN" -a -n "$$TELEGRAM_CHAT_ID" || \
 	  { echo "usage: make alerts-telegram TELEGRAM_BOT_TOKEN=<from @BotFather> TELEGRAM_CHAT_ID=<your chat id>"; exit 1; }

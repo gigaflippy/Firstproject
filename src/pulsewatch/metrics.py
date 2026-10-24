@@ -22,7 +22,7 @@ class Metrics:
         )
         self.latency = Histogram(
             "pulsewatch_probe_latency_seconds",
-            "Probe round-trip latency in seconds (successful responses only)",
+            "Probe round-trip latency in seconds (any HTTP response; not timeouts or errors)",
             labels,
             buckets=LATENCY_BUCKETS,
             registry=self.registry,

@@ -4,6 +4,8 @@ Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, sto
 
 > Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready), SLOs with error-budget burn-rate alerts, chaos experiments with meta-monitoring.** The original [roadmap](#roadmap) is complete; extras are listed under it.
 
+**New here?** Read [docs/GUIDE.md](docs/GUIDE.md) first. It explains the whole project in plain language: what each part does, how a probe becomes an alert, how to run it, and how to talk about it.
+
 ## Quick start
 
 ```bash
@@ -130,7 +132,8 @@ Telegram is switched on only by credentials that exist on your machine. Nothing 
 docker compose up -d alertmanager
 
 # Kubernetes: creates the optional Secret "alertmanager-telegram" from your shell and restarts Alertmanager
-make alerts-telegram TELEGRAM_BOT_TOKEN=123456:ABC... TELEGRAM_CHAT_ID=123456789
+read -rs TELEGRAM_BOT_TOKEN && export TELEGRAM_BOT_TOKEN   # paste the token; it is not echoed or kept in shell history
+make alerts-telegram TELEGRAM_CHAT_ID=123456789
 make alerts-test SEVERITY=page    # synthetic alert; arrives in Telegram and the sink within ~10s
 make alerts-inbox                 # what the sink received
 make alerts-telegram-off          # back to the sink only
@@ -159,7 +162,7 @@ make alerts-telegram-off          # back to the sink only
 
 The dashboard is provisioned read-only. To change it, edit it in the UI, export the JSON, and replace `deploy/grafana/dashboards/pulsewatch.json`. `tests/test_deploy_config.py` fails if a panel queries a metric that the code or the recording rules don't produce, so renames can't silently blank a panel.
 
-Set `GRAFANA_ADMIN_PASSWORD` before starting if port 3000 is reachable from other machines.
+Compose publishes every port on `127.0.0.1` only, because Alertmanager, Prometheus and the alert sink have no login. If you change that, set `GRAFANA_ADMIN_PASSWORD` too.
 
 ## Kubernetes (kind / k3d)
 
@@ -298,6 +301,16 @@ pytest
 
 CI (GitHub Actions) runs lint, tests on Python 3.11 to 3.13, a Docker build with a smoke test, and a full-stack job that runs `promtool check config`, brings up the compose stack, and checks that Prometheus is scraping Pulsewatch and Alertmanager, Grafana serves the provisioned dashboard and a healthy datasource, and an alert travels from a failing probe to the alert sink (see [Alert routing](#alert-routing)).
 
+## How this was built
+
+Pulsewatch is built by Georgi Georgiev with [Claude](https://claude.com/claude-code) as a pair programmer.
+
+- **Georgi** chose the project, the stack and the constraints (zero cost, local infrastructure only), and made the design calls recorded in [DECISIONS.md](DECISIONS.md): what to build (D-001), Terraform over OpenTofu (D-002) and the alert-routing approach (D-003). He reviews and merges every pull request.
+- **Claude** wrote most of the code, manifests and CI from that direction. Most of it was done in scheduled overnight runs, each one delivered as a pull request with a description of what changed, why, and how to test it.
+- **Every change** passes the full CI suite before merge: lint, unit tests, rule tests, and real deployments to throwaway kind clusters.
+
+The pull request history and DECISIONS.md show the work step by step.
+
 ## Roadmap
 
 1. ~~**v0.1:** core probe service, REST API, Prometheus metrics, Docker, CI~~ ✅
@@ -313,4 +326,5 @@ Beyond the original roadmap:
 - ~~Committed Terraform provider lockfile, enforced in CI~~ ✅
 - ~~Per-target availability SLOs: error-budget recording rules, multiwindow burn-rate alerts, dashboard row~~ ✅
 - ~~Chaos experiments (regional partition, lost region, all agents lost), CI-tested on kind, plus meta-monitoring alerts for lost probe agents~~ ✅
-- Next candidates: k6 load test of the API, an architecture diagram, a Helm chart.
+- ~~Project guide with architecture diagrams ([docs/GUIDE.md](docs/GUIDE.md))~~ ✅
+- Next candidates: k6 load test of the API, a Helm chart.

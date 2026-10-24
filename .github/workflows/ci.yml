@@ -11,9 +11,10 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install ruff
@@ -22,12 +23,13 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -36,9 +38,10 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: docker build -t pulsewatch:ci .
       - name: Smoke test
         run: |
@@ -52,12 +55,13 @@ jobs:
     # Brings up the full compose stack: Prometheus scrapes Pulsewatch, Grafana is provisioned,
     # and alerts travel probe -> rule -> Alertmanager -> alert sink with routing and inhibition.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
     env:
       # One target that is always down, so TargetDown fires for real (see the fixture).
       PULSEWATCH_TARGETS: ./tests/fixtures/targets-alerting.yaml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: promtool check + rule unit tests
         run: |
           promtool() { docker run --rm --entrypoint promtool -w /etc/prometheus \
@@ -176,8 +180,9 @@ jobs:
   k8s-manifests:
     # Renders the kind overlay and schema-checks every resource against Kubernetes 1.30.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install kubeconform
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
@@ -195,9 +200,10 @@ jobs:
   kind:
     # Deploys the overlay to a throwaway kind cluster and checks the whole stack end to end.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, k8s-manifests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: helm/kind-action@v1
         with:
           cluster_name: pulsewatch
@@ -279,9 +285,10 @@ jobs:
   kind-multi-region:
     # Two probe regions in separate namespaces, one Prometheus discovering both via the k8s API.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, k8s-manifests]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: helm/kind-action@v1
         with:
           cluster_name: pulsewatch
@@ -331,7 +338,7 @@ jobs:
     env:
       CHECK: python3 scripts/chaos_check.py --timeout 540
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: helm/kind-action@v1
         with:
           cluster_name: pulsewatch
@@ -407,13 +414,14 @@ jobs:
     # GitOps end to end: Argo CD on kind deploys the multi-region stack from this
     # commit on GitHub, then puts back a Deployment that was deleted by hand (self-heal).
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, k8s-manifests]
     env:
       # The commit under test (the PR head on pull_request events, not the merge commit).
       REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       GITOPS_REPO: ${{ github.server_url }}/${{ github.event.pull_request.head.repo.full_name || github.repository }}.git
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: helm/kind-action@v1
         with:
           cluster_name: pulsewatch
@@ -489,8 +497,9 @@ jobs:
     # platform in TF_LOCK_PLATFORMS. Without it, `terraform init` silently picked up a new
     # provider release overnight and broke `kind load`.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
@@ -509,12 +518,13 @@ jobs:
   terraform:
     # infra/terraform: fmt + validate, then a real apply (kind cluster + multi-region stack) and destroy.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, k8s-manifests, terraform-lock]
     defaults:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
