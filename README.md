@@ -4,7 +4,7 @@ Distributed uptime and latency monitor. Probes HTTP endpoints on a schedule, sto
 
 > Status: **v0.1 core, Grafana, Kubernetes (kind), multi-region agents, Terraform, Argo CD GitOps, alert routing (Alertmanager, Telegram-ready), SLOs with error-budget burn-rate alerts, chaos experiments with meta-monitoring.** The original [roadmap](#roadmap) is complete; extras are listed under it.
 
-**New here?** Read [docs/GUIDE.md](docs/GUIDE.md) first. It explains the whole project in plain language: what each part does, how a probe becomes an alert, how to run it, and how to talk about it.
+**New here?** Read [docs/GUIDE.md](docs/GUIDE.md) first. It explains the whole project in plain language: what each part does, how a probe becomes an alert, how to run it, and what went wrong along the way.
 
 ## Quick start
 
@@ -100,7 +100,7 @@ Every target has an availability objective (`slo_objective`, default **99.5%**) 
 - **Multiwindow, multi-burn-rate alerts**, as in the Google SRE workbook. Each alert needs a long window, so enough budget has really been spent, and a short window, so the target is still failing now and the alert resolves soon after recovery. Burn rate 1 spends the budget in exactly 7 days; 14.4 spends it in about 12 hours.
 - **What the burn alerts add:** `TargetDown` needs 2 minutes of continuous downtime, so a target that flaps or fails every third probe never trips it, but it still burns budget. `ErrorBudgetBurnFast` pages for that.
 - **One page per outage:** a hard outage already pages as `TargetDown`. Fast burn waits 5m, longer than `TargetDown`'s 2m, and stays quiet for 10m after `TargetDown` last fired, because its 5m window keeps burning for a few minutes after recovery. In Alertmanager, `TargetDown` holds back `ErrorBudgetBurnSlow` for the same target, and so does `ErrorBudgetBurnFast`. Slow burn can still warn after a long outage has ended, because by then that outage really has spent much of the week's budget.
-- **Tested:** `rules.test.yml` covers a flapping target (fast burn pages, `TargetDown` doesn't), a hard outage including the minutes after recovery (only `TargetDown`), one bad region (no budget spent), a steady 5% failure rate (slow burn warns, no page) and per-target objectives. The CI stack job checks that the always-down fixture target ends up with a negative budget and no fast-burn page.
+- **Tested:** `rules.test.yml` covers a flapping target (fast burn pages, `TargetDown` doesn't), a hard outage including the minutes after recovery (only `TargetDown`), one bad region (no budget spent), a steady 5% failure rate (slow burn warns, no page) and per-target objectives. The CI stack job checks that the always-down fixture target ends up with a negative budget. The fast-burn suppression during an outage is proven by `rules.test.yml`; the CI check for it runs too early in the outage to fail on its own.
 
 ## Alert routing
 
@@ -117,11 +117,11 @@ Prometheus rules ──► Alertmanager ──┬─ severity=page ─► receiv
 - **Grouping:** by `alertname` and `target`. One notification per broken target, and the regions of one target are batched into it.
 - **Inhibition:** while `TargetDown` fires for a target (down from every region, paged), `TargetDownInSomeRegions`, `TargetSlow` and `ErrorBudgetBurnSlow` for the same target are held back. `ErrorBudgetBurnFast` holds back `ErrorBudgetBurnSlow` too, and `ProbeAgentsAbsent` holds back every `ProbeRegionMissing`. One page, not several messages about the same outage.
 - **Alert sink:** `pulsewatch-alertsink` is a tiny webhook inbox from the Pulsewatch image (standard library only). It logs one line per alert and serves `GET /notifications?receiver=page`. It makes routing visible, and testable, without any credential.
-- **Delivery is watched:** Prometheus scrapes Alertmanager, and `AlertmanagerNotificationsFailing` warns when a receiver keeps failing. A revoked token doesn't go unnoticed until the next real outage.
+- **Delivery is watched:** Prometheus scrapes Alertmanager, and `AlertmanagerNotificationsFailing` warns when a receiver keeps failing. A revoked token doesn't go unnoticed until the next real outage. If Alertmanager itself is down, nothing can notify you: that needs an outside dead man's switch (a heartbeat alert to an external service), which this local stack does not have.
 
 ### Telegram
 
-Telegram is switched on only by credentials that exist on your machine. Nothing secret is in the repo, and the token only reaches Alertmanager as a 0600 file (`bot_token_file`), never inside a config file or its environment.
+Telegram is switched on only by credentials that exist on your machine. Nothing secret is in the repo. `start.sh` writes the token to a 0600 file (`bot_token_file`) and removes it from the environment of the Alertmanager process, so it is never in a config file. The container's own environment still holds it (`docker inspect`, `kubectl exec ... env`), so anyone with Docker or cluster access can read it. That is acceptable for a local stack.
 
 1. Message [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
 2. Send your bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id":...}`.

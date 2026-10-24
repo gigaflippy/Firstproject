@@ -1,6 +1,6 @@
 # Pulsewatch: the project guide
 
-This guide explains the whole project in plain language. Read it from top to bottom once, and you will know what every part does, why it is there, and how to explain it to someone else. The [README](../README.md) is the reference. This file is the story.
+This guide explains the whole project in plain language. Read it from top to bottom once, and you will know what every part does, why it is there, and why it is built that way. The [README](../README.md) is the reference. This file is the story.
 
 **Contents**
 
@@ -12,9 +12,8 @@ This guide explains the whole project in plain language. Read it from top to bot
 6. [Four ways to run it, and when to use each](#6-four-ways-to-run-it)
 7. [What CI proves on every change](#7-what-ci-proves-on-every-change)
 8. [Honest limits](#8-honest-limits)
-9. [Talking about it in an interview](#9-talking-about-it-in-an-interview)
-10. [Your checklist](#10-your-checklist)
-11. [Glossary](#11-glossary)
+9. [Lessons learned and common questions](#9-lessons-learned-and-common-questions)
+10. [Glossary](#10-glossary)
 
 ---
 
@@ -22,7 +21,7 @@ This guide explains the whole project in plain language. Read it from top to bot
 
 Pulsewatch watches websites and APIs and tells you when they break.
 
-Every few seconds it sends an HTTP request to each **target** (for example `https://example.com`). It records whether the target answered with the expected status code and how long the answer took. From those results it produces:
+On a fixed interval (every 30 seconds by default) it sends an HTTP request to each **target** (for example `https://example.com`). It records whether the target answered with the expected status code and how long the answer took. From those results it produces:
 
 - a REST API with uptime and latency numbers,
 - Prometheus **metrics**,
@@ -102,7 +101,7 @@ sequenceDiagram
 1. **Schedule.** `scheduler.py` starts one loop per target. Each loop waits a short random time first, so targets do not all fire at the same moment. Then it probes every `interval_seconds`.
 2. **Probe.** `probe.py` sends the request with a timeout. It never raises an exception. A timeout or connection error becomes a result with `up=false` and an `error` string, so one broken target cannot stop the loop.
 3. **Store.** `storage.py` writes the result to SQLite. The `/status` API endpoint reads from here and calculates uptime % and p50/p95 latency. Old rows are deleted every hour (default retention: 72 hours).
-4. **Expose.** `metrics.py` updates three series: `pulsewatch_up` (1 or 0), a latency histogram, and a counter of probes by result. Every series has `target` and `region` labels.
+4. **Expose.** `metrics.py` updates three series after each probe: `pulsewatch_up` (1 or 0), a latency histogram, and a counter of probes by result. A fourth, `pulsewatch_slo_objective`, is set once at startup from `targets.yaml`. Every series has `target` and `region` labels.
 5. **Collect.** Prometheus scrapes `/metrics` every 15 seconds. In Kubernetes it finds the agents by itself through the Kubernetes API (service discovery), so a new region needs no config change.
 6. **Decide.** Prometheus evaluates `deploy/prometheus/rules.yml` every 15 seconds. If the rule condition stays true for long enough (the `for:` time), the alert fires.
 7. **Route.** Alertmanager receives the alert and follows `deploy/alertmanager/alertmanager.yml`: `severity=page` goes to the `page` receiver and `severity=warn` to `warn`. It groups by target, so one broken target gives one message, and it holds back alerts that only repeat what a bigger alert already said (inhibition).
@@ -131,7 +130,7 @@ Consensus has a blind spot. A dead agent does not report "down", it reports **no
 - `ProbeRegionMissing` (warn): a region that reported in the last hour has stopped.
 - `ProbeAgentsAbsent` (page): no agent reports at all, so alerting is blind.
 
-A third, `AlertmanagerNotificationsFailing`, catches a broken delivery path, for example a revoked Telegram token.
+A third, `AlertmanagerNotificationsFailing`, catches a broken delivery path, for example a revoked Telegram token. One gap is left: if Alertmanager itself is down, nothing can deliver any alert. Closing that needs a "dead man's switch", a heartbeat sent to a service outside the stack, which a local-only project does not have.
 
 ### 4.3 SLOs and error budgets
 
@@ -143,7 +142,7 @@ Why this matters: `TargetDown` needs 2 minutes of *continuous* downtime. A targe
 
 ### 4.4 Inhibition: one page per outage
 
-During a full outage, many alerts are true at the same time: down, slow, burning budget. Alertmanager's `inhibit_rules` hold back the smaller ones while `TargetDown` fires for the same target. You get one page, not five messages about the same incident.
+During a full outage, many alerts are true at the same time: down, slow, burning budget. Two mechanisms keep this to one page. Alertmanager's `inhibit_rules` hold back the smaller alerts (`TargetDownInSomeRegions`, `TargetSlow`, `ErrorBudgetBurnSlow`) while `TargetDown` fires for the same target. `ErrorBudgetBurnFast` is kept quiet by its own rule instead: it does not fire for a target where `TargetDown` fired in the last 10 minutes.
 
 ### 4.5 One set of manifests, three ways to apply them
 
@@ -245,7 +244,7 @@ make chaos-heal
 make kind-down
 ```
 
-Take a screenshot of Grafana while the partition is active. It is the best picture of the project you can put in the README (see the [checklist](#10-your-checklist)).
+Take a screenshot of Grafana while the partition is active. It is the best picture of the project to put in the README.
 
 **When something goes wrong:**
 
@@ -286,66 +285,38 @@ Failing Kubernetes jobs print pod status, events and logs as **annotations** on 
 
 ## 8. Honest limits
 
-Know these before an interviewer finds them. Saying them first shows you understand the design.
+These are deliberate trade-offs for a local, zero-cost project. Each one says what a production setup would do instead.
 
 - **The regions are simulated.** "eu-sim" and "us-sim" run on the same laptop, so they show the design (discovery, labels, consensus) and not real geographic diversity. Real regions are the same manifests on clusters in different places, with Prometheus federation or remote-write on top.
 - **SQLite allows one writer.** Each region therefore runs exactly one agent (`replicas: 1`, `strategy: Recreate`). You scale out by adding regions, not replicas. `storage.py` is the place to swap in Postgres.
-- **Prometheus data lives on an `emptyDir` in Kubernetes.** A Prometheus pod restart empties the 7-day SLO history, so the error budget looks untouched again. A real setup uses a PersistentVolume.
+- **Prometheus data lives on an `emptyDir` in Kubernetes.** A Prometheus pod restart deletes the history, so the 7-day SLO numbers are then calculated from only the time since the restart. On a fresh cluster or after a restart, a short failure counts for a large share of that short history, and `ErrorBudgetBurnSlow` can warn early. A real setup uses a PersistentVolume.
+- **Nothing watches Alertmanager from outside.** If Alertmanager is down, no alert can reach you (section 4.2).
 - **No authentication anywhere.** It is a local stack. Compose publishes every port on `127.0.0.1` only, and in Kubernetes you reach things through `kubectl port-forward`. Grafana's `admin/admin` is a local default.
 - **The image is side-loaded, not pulled.** `kind load` puts the image into the cluster directly, so no registry is needed. Argo CD therefore syncs manifests but not image versions.
 - **The version number is still `0.1.0`.** The code has grown a lot since then. Tag a release (for example `v1.0.0`) when you are happy with it.
 
 ---
 
-## 9. Talking about it in an interview
+## 9. Lessons learned and common questions
 
-**The 30-second version:**
-
-> Pulsewatch is a multi-region uptime monitor I built as a production-style service on local Kubernetes. Probe agents in separate namespaces feed one Prometheus through Kubernetes service discovery. Alerts page only when every region agrees, there are SLO burn-rate alerts for flapping targets, and meta-alerts fire if the probes themselves die. Terraform creates the cluster, Argo CD deploys from Git, and CI runs chaos experiments on a real kind cluster on every pull request.
-
-**Three real problems from this project, and what fixed them.** These are better than any feature list, because they show debugging:
+**Three real problems from building this, and what fixed them:**
 
 1. **The pod that crashed for no reason.** On Kubernetes, the agent crashed at startup with "PULSEWATCH_PORT: unable to parse `tcp://10.96.x.x:8000` as an integer". Cause: Kubernetes injects Docker-link style environment variables for every Service, and a Service named `pulsewatch` produces `PULSEWATCH_PORT`, which collides with the app's own `PULSEWATCH_*` settings. Fix: `enableServiceLinks: false` on every pod, and a regression test that fails if anyone removes it.
 2. **CI went red overnight with no change in the repo.** The Terraform job failed one morning. Cause: there was no provider lockfile, so `terraform init` picked up a new `tehcyx/kind` provider release that broke `kind load`. Fix: commit `.terraform.lock.hcl`, pin the kind node image, and a CI job that fails if the lockfile is incomplete. Lesson: an unpinned dependency is a change you did not review.
 3. **Argo CD stuck in ImagePullBackOff.** Argo CD's Redis image comes from `public.ecr.aws`, which rate-limits, and upstream sets `imagePullPolicy: Always`. Fix: pre-pull the images with retries in CI, and patch the policy to `IfNotPresent`.
 
-**Questions you should expect, with short answers:**
+**Common questions about the design:**
 
 - *Why not just alert when a probe fails?* One location can be wrong. Consensus across regions removes false pages from a bad vantage point, and the partial case still produces a warning.
-- *What if the monitoring itself dies?* `ProbeRegionMissing` and `ProbeAgentsAbsent`, plus `AlertmanagerNotificationsFailing` for the delivery path.
+- *What if the monitoring itself dies?* `ProbeRegionMissing` and `ProbeAgentsAbsent` cover lost probe agents, and `AlertmanagerNotificationsFailing` covers a broken receiver. Alertmanager being down is not covered (section 4.2).
 - *Why SLO burn rates on top of TargetDown?* TargetDown misses intermittent failures. A burn rate measures how fast the error budget goes, with a long and a short window so it is neither noisy nor slow to clear.
 - *Why Kustomize and not Helm?* There is one app with small differences per environment. Overlays express that directly, and kubectl and Argo CD support them with no extra tool.
-- *How do you keep secrets out of Git?* The Telegram token only exists on your machine. It goes into a git-ignored `.env` or a Kubernetes Secret created from your shell, and Alertmanager reads it from a 0600 file, never from a config file.
+- *How do you keep secrets out of Git?* The Telegram token only exists on the owner's machine. It goes into a git-ignored `.env` or a Kubernetes Secret created from your shell, and Alertmanager reads it from a 0600 file, never from a config file.
 - *What would you change for production?* Real clusters per region, a registry with signed images, persistent Prometheus storage or remote-write, authentication in front of the UIs, and Postgres instead of SQLite.
 
-**Be honest about how it was built.** Claude wrote most of the code. You chose the project, the stack and the constraints, made the decisions in DECISIONS.md, and reviewed and merged every change. Say exactly that if anyone asks. Then show that you understand it: every answer above comes from this guide, and the interviewer will test your understanding, not your typing.
-
 ---
 
-## 10. Your checklist
-
-Things only you can do, in a sensible order. None of them takes more than a few minutes.
-
-**Repository settings** (github.com/gigaflippy/pulsewatch → Settings)
-
-- [ ] Merge the open pull requests (section "Pull requests" of the review PR lists the order).
-- [ ] **Default branch:** it is still called `claude/hello-test`. There is also an old, stale branch called `main`. Delete the stale `main` (Branches page), then rename `claude/hello-test` to `main` (Settings → General → Default branch → rename). GitHub moves open PRs to the new name, and Argo CD keeps working because it follows `HEAD`.
-- [ ] **About box** (gear icon next to "About" on the repo page): set a description, for example "Multi-region uptime monitor on local Kubernetes: Prometheus, SLO alerting, Terraform, Argo CD, chaos-tested in CI". Add topics: `kubernetes`, `prometheus`, `grafana`, `terraform`, `argocd`, `gitops`, `sre`, `slo`, `monitoring`, `fastapi`.
-- [ ] **Licence:** answer D-004 in DECISIONS.md (one word).
-- [ ] **Pin the repository** on your profile (Customize your pins).
-
-**Evidence that you did the work** (this matters more than any feature)
-
-- [ ] Run it yourself once (section 6, "A first session"), and put a Grafana screenshot in the README.
-- [ ] On the next pull request, leave real review comments on specific lines. Ask for a change at least once before you approve.
-- [ ] Make some commits yourself. Small ones count: a new target, a tuned threshold, a fix you found while running it.
-- [ ] Open a GitHub issue for anything odd you notice while running it.
-- [ ] Write your answers in DECISIONS.md with your own reasoning, not only the option number.
-- [ ] Keep a note whenever you reject or change Claude's approach. Those notes become interview stories.
-
----
-
-## 11. Glossary
+## 10. Glossary
 
 | Term | Meaning here |
 |---|---|

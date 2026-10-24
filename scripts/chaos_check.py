@@ -120,7 +120,9 @@ def wait(check: Callable[[], bool], timeout: float, every: float = 5.0) -> bool:
         try:
             if check():
                 return True
-        except OSError as exc:  # port-forward hiccup: keep waiting
+        # Port-forward hiccup, empty or non-JSON body, or a failed query right after a
+        # restart: keep waiting until the timeout instead of crashing the chaos job.
+        except (OSError, ValueError, RuntimeError) as exc:
             print(f"  (retrying: {exc})", file=sys.stderr)
         if time.monotonic() >= deadline:
             return False

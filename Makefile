@@ -195,7 +195,8 @@ chaos-partition:
 chaos-kill-region:
 	kubectl -n $(CHAOS_NS) scale deployment/pulsewatch --replicas=0
 	@for i in $$(seq 1 60); do \
-	  test -z "$$(kubectl -n $(CHAOS_NS) get pods -l app.kubernetes.io/name=pulsewatch -o name)" && exit 0; sleep 2; \
+	  pods=$$(kubectl -n $(CHAOS_NS) get pods -l app.kubernetes.io/name=pulsewatch -o name) || exit 1; \
+	  test -z "$$pods" && exit 0; sleep 2; \
 	done; echo "pods in $(CHAOS_NS) did not terminate"; exit 1
 	@echo "$(CHAOS_NS) agent is gone. Expect ProbeRegionMissing (warn) after 5m; ProbeAgentsAbsent (page) if it was the last one."
 
